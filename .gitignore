@@ -1,0 +1,6 @@
+.zig-cache/
+zig-out/
+*.o
+test_al
+test_arraylist
+test_arraylist2
