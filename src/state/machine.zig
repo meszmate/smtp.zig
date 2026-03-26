@@ -22,8 +22,8 @@ pub const Machine = struct {
             .allocator = allocator,
             .state = initial,
             .transitions = std.AutoHashMap(ConnState, []const ConnState).init(allocator),
-            .before_hooks = std.ArrayList(TransitionHook).init(allocator),
-            .after_hooks = std.ArrayList(TransitionHook).init(allocator),
+            .before_hooks = .empty,
+            .after_hooks = .empty,
         };
         m.setDefaultTransitions();
         return m;
@@ -31,8 +31,8 @@ pub const Machine = struct {
 
     pub fn deinit(self: *Machine) void {
         self.transitions.deinit();
-        self.before_hooks.deinit();
-        self.after_hooks.deinit();
+        self.before_hooks.deinit(self.allocator);
+        self.after_hooks.deinit(self.allocator);
     }
 
     pub fn current(self: *const Machine) ConnState {
@@ -64,11 +64,11 @@ pub const Machine = struct {
     }
 
     pub fn onBefore(self: *Machine, hook: TransitionHook) !void {
-        try self.before_hooks.append(hook);
+        try self.before_hooks.append(self.allocator, hook);
     }
 
     pub fn onAfter(self: *Machine, hook: TransitionHook) !void {
-        try self.after_hooks.append(hook);
+        try self.after_hooks.append(self.allocator, hook);
     }
 
     pub fn setTransitions(self: *Machine, specs: []const TransitionSpec) void {

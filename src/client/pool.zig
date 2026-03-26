@@ -54,7 +54,7 @@ pub const Pool = struct {
         defer self.mutex.unlock();
 
         for (self.idle.items) |c| {
-            c.quit() catch {};
+            _ = c.quit() catch {};
             c.deinit();
             self.allocator.destroy(c);
         }
@@ -69,9 +69,9 @@ pub const Pool = struct {
             defer self.mutex.unlock();
 
             if (self.idle.items.len > 0) {
-                const c = self.idle.pop();
+                const c = self.idle.pop().?;
                 // Validate the connection with a NOOP before returning.
-                c.noop() catch {
+                _ = c.noop() catch {
                     // Connection is stale, discard it.
                     c.deinit();
                     self.allocator.destroy(c);
@@ -91,14 +91,14 @@ pub const Pool = struct {
         defer self.mutex.unlock();
 
         if (self.idle.items.len >= self.opts.max_idle) {
-            c.quit() catch {};
+            _ = c.quit() catch {};
             c.deinit();
             self.allocator.destroy(c);
             return;
         }
 
         self.idle.append(self.allocator, c) catch {
-            c.quit() catch {};
+            _ = c.quit() catch {};
             c.deinit();
             self.allocator.destroy(c);
         };
@@ -125,7 +125,7 @@ pub const Pool = struct {
         }
 
         // EHLO with our hostname.
-        var hostname_buf: [256]u8 = undefined;
+        var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
         const hostname = std.posix.gethostname(&hostname_buf) catch "localhost";
         _ = try c.ehlo(hostname);
 

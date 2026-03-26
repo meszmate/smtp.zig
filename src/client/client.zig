@@ -479,7 +479,7 @@ pub const Client = struct {
         self.capabilities.clear();
 
         // Re-issue EHLO over the encrypted channel.
-        var hostname_buf: [256]u8 = undefined;
+        var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
         const hostname = std.posix.gethostname(&hostname_buf) catch "localhost";
         return try self.ehlo(hostname);
     }

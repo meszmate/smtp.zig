@@ -39,6 +39,7 @@ pub const SessionState = struct {
     pub fn deinit(self: *SessionState) void {
         self.freeFrom();
         self.freeRecipients();
+        self.recipients.deinit(self.allocator);
         self.freeUsername();
         self.freeClientDomain();
     }

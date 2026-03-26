@@ -91,6 +91,7 @@ pub const MemStore = struct {
     pub fn deinit(self: *MemStore) void {
         var it = self.users.iterator();
         while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
             entry.value_ptr.*.deinit();
             self.allocator.destroy(entry.value_ptr.*);
         }

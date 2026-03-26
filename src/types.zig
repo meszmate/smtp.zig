@@ -298,33 +298,18 @@ pub const Timeouts = struct {
 
 pub fn formatDateRfc5322(buffer: []u8, unix_seconds: u64) ![]const u8 {
     const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = unix_seconds };
-    const year_day = epoch_seconds.getEpochDay().calculateYearDay();
+    const epoch_day = epoch_seconds.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const day_seconds = epoch_seconds.getDaySeconds();
-    const day_of_week = epoch_seconds.getEpochDay().calculateDayOfWeek();
-    const dow = switch (day_of_week) {
-        .mon => "Mon",
-        .tue => "Tue",
-        .wed => "Wed",
-        .thu => "Thu",
-        .fri => "Fri",
-        .sat => "Sat",
-        .sun => "Sun",
-    };
-    const month_name = switch (month_day.month) {
-        .jan => "Jan",
-        .feb => "Feb",
-        .mar => "Mar",
-        .apr => "Apr",
-        .may => "May",
-        .jun => "Jun",
-        .jul => "Jul",
-        .aug => "Aug",
-        .sep => "Sep",
-        .oct => "Oct",
-        .nov => "Nov",
-        .dec => "Dec",
-    };
+    // Compute day of week: Unix epoch (1970-01-01) was a Thursday.
+    // 0=Sun,1=Mon,...,6=Sat. Thursday=4.
+    const raw_dow = @mod(@as(i64, @intCast(epoch_day.day)) + 4, 7);
+    const dow_index: usize = @intCast(if (raw_dow < 0) raw_dow + 7 else raw_dow);
+    const dow_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const dow = dow_names[dow_index];
+    const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const month_name = month_names[month_day.month.numeric() - 1];
     return std.fmt.bufPrint(
         buffer,
         "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +0000",

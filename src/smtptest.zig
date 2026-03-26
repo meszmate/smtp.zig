@@ -79,14 +79,14 @@ pub const PipeTransport = struct {
 
     pub fn transport(self: *PipeTransport) wire.Transport {
         return .{
-            .ctx = @ptrCast(self),
+            .context = @ptrCast(self),
             .read_fn = readFn,
             .write_fn = writeFn,
             .close_fn = closeFn,
         };
     }
 
-    fn readFn(ctx: *anyopaque, buffer: []u8) anyerror!usize {
+    fn readFn(ctx: *anyopaque, buffer: []u8) wire.Transport.ReadError!usize {
         const self: *PipeTransport = @ptrCast(@alignCast(ctx));
         if (self.read_pos >= self.input.items.len) return 0;
         const available = self.input.items[self.read_pos..];
@@ -96,13 +96,13 @@ pub const PipeTransport = struct {
         return to_read;
     }
 
-    fn writeFn(ctx: *anyopaque, data: []const u8) anyerror!usize {
+    fn writeFn(ctx: *anyopaque, data: []const u8) wire.Transport.WriteError!usize {
         const self: *PipeTransport = @ptrCast(@alignCast(ctx));
-        self.output.appendSlice(self.allocator, data) catch return error.OutOfMemory;
+        self.output.appendSlice(self.allocator, data) catch return error.Unexpected;
         return data.len;
     }
 
-    fn closeFn(_: *anyopaque) anyerror!void {}
+    fn closeFn(_: *anyopaque) void {}
 };
 
 /// MockSession provides a minimal mock session for testing.
