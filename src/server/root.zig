@@ -4,6 +4,8 @@ pub const session = @import("session.zig");
 pub const options = @import("options.zig");
 pub const dispatch = @import("dispatch.zig");
 pub const extensions = @import("extensions.zig");
+pub const writers = @import("writers.zig");
+pub const tracker = @import("tracker.zig");
 
 pub const Server = server.Server;
 pub const Conn = conn.Conn;
@@ -15,3 +17,7 @@ pub const CommandContext = dispatch.CommandContext;
 pub const CommandHandlerFn = dispatch.CommandHandlerFn;
 pub const ServerExtension = extensions.ServerExtension;
 pub const ExtensionManager = extensions.ExtensionManager;
+pub const ResponseWriter = writers.ResponseWriter;
+pub const StatusWriter = writers.StatusWriter;
+pub const SessionTracker = tracker.SessionTracker;
+pub const ServerTracker = tracker.ServerTracker;
