@@ -1,4 +1,6 @@
 const std = @import("std");
+const fsstore = @import("fsstore.zig");
+const pgstore = @import("pgstore.zig");
 
 /// Type-erased authentication backend interface.
 pub const Backend = struct {
@@ -66,6 +68,74 @@ pub const Backend = struct {
             },
         };
     }
+
+    /// Create a Backend from a concrete FsStore pointer.
+    pub fn fromFsStore(store: *fsstore.FsStore) Backend {
+        const Impl = struct {
+            fn authenticateFn(ctx: *anyopaque, username: []const u8, password: []const u8) ?bool {
+                const s: *fsstore.FsStore = @ptrCast(@alignCast(ctx));
+                _ = s.authenticate(username, password) catch return null;
+                return true;
+            }
+
+            fn authenticateExternalFn(_: *anyopaque, _: []const u8) ?bool {
+                return null;
+            }
+
+            fn authenticateTokenFn(_: *anyopaque, _: []const u8, _: []const u8) ?bool {
+                return null;
+            }
+
+            fn addUserFn(ctx: *anyopaque, username: []const u8, password: []const u8) anyerror!void {
+                const s: *fsstore.FsStore = @ptrCast(@alignCast(ctx));
+                try s.addUser(username, password);
+            }
+        };
+
+        return .{
+            .context = @ptrCast(store),
+            .vtable = &.{
+                .authenticate = Impl.authenticateFn,
+                .authenticate_external = Impl.authenticateExternalFn,
+                .authenticate_token = Impl.authenticateTokenFn,
+                .add_user = Impl.addUserFn,
+            },
+        };
+    }
+
+    /// Create a Backend from a concrete PgStore pointer.
+    pub fn fromPgStore(store: *pgstore.PgStore) Backend {
+        const Impl = struct {
+            fn authenticateFn(ctx: *anyopaque, username: []const u8, password: []const u8) ?bool {
+                const s: *pgstore.PgStore = @ptrCast(@alignCast(ctx));
+                _ = s.authenticate(username, password) catch return null;
+                return true;
+            }
+
+            fn authenticateExternalFn(_: *anyopaque, _: []const u8) ?bool {
+                return null;
+            }
+
+            fn authenticateTokenFn(_: *anyopaque, _: []const u8, _: []const u8) ?bool {
+                return null;
+            }
+
+            fn addUserFn(ctx: *anyopaque, username: []const u8, password: []const u8) anyerror!void {
+                const s: *pgstore.PgStore = @ptrCast(@alignCast(ctx));
+                try s.addUser(username, password);
+            }
+        };
+
+        return .{
+            .context = @ptrCast(store),
+            .vtable = &.{
+                .authenticate = Impl.authenticateFn,
+                .authenticate_external = Impl.authenticateExternalFn,
+                .authenticate_token = Impl.authenticateTokenFn,
+                .add_user = Impl.addUserFn,
+            },
+        };
+    }
 };
 
 /// Type-erased delivery backend interface.
@@ -87,6 +157,40 @@ pub const DeliveryBackend = struct {
         const Impl = struct {
             fn deliverFn(ctx: *anyopaque, from: []const u8, recipients: []const []u8, body: []const u8) anyerror!u32 {
                 const s: Ptr = @ptrCast(@alignCast(ctx));
+                return try s.deliverMessage(from, recipients, body);
+            }
+        };
+
+        return .{
+            .context = @ptrCast(store),
+            .vtable = &.{
+                .deliver_message = Impl.deliverFn,
+            },
+        };
+    }
+
+    /// Create a DeliveryBackend from a concrete FsStore pointer.
+    pub fn fromFsStore(store: *fsstore.FsStore) DeliveryBackend {
+        const Impl = struct {
+            fn deliverFn(ctx: *anyopaque, from: []const u8, recipients: []const []u8, body: []const u8) anyerror!u32 {
+                const s: *fsstore.FsStore = @ptrCast(@alignCast(ctx));
+                return try s.deliverMessage(from, recipients, body);
+            }
+        };
+
+        return .{
+            .context = @ptrCast(store),
+            .vtable = &.{
+                .deliver_message = Impl.deliverFn,
+            },
+        };
+    }
+
+    /// Create a DeliveryBackend from a concrete PgStore pointer.
+    pub fn fromPgStore(store: *pgstore.PgStore) DeliveryBackend {
+        const Impl = struct {
+            fn deliverFn(ctx: *anyopaque, from: []const u8, recipients: []const []u8, body: []const u8) anyerror!u32 {
+                const s: *pgstore.PgStore = @ptrCast(@alignCast(ctx));
                 return try s.deliverMessage(from, recipients, body);
             }
         };
