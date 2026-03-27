@@ -11,6 +11,7 @@ pub const extension = @import("extension/root.zig");
 pub const auth = @import("auth/root.zig");
 pub const middleware = @import("middleware/root.zig");
 pub const mime = @import("mime/root.zig");
+pub const dkim = @import("dkim/root.zig");
 
 pub const ConnState = types.ConnState;
 pub const DsnNotify = types.DsnNotify;
