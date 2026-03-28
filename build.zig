@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
         "tests/store_interface_tests.zig",
         "tests/middleware_tests.zig",
         "tests/mime_tests.zig",
+        "tests/dkim_tests.zig",
     };
 
     const test_step = b.step("test", "Run unit tests");
