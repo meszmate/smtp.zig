@@ -610,6 +610,30 @@ pub const Client = struct {
         freeResp(self.allocator, &resp);
     }
 
+    pub fn authenticateOAuthBearer(self: *Client, user: []const u8, access_token: []const u8, host: ?[]const u8, port: ?u16) !void {
+        const initial = try auth_mod.oauthbearer.initialResponseAlloc(self.allocator, user, access_token, host, port);
+        defer self.allocator.free(initial);
+
+        var encoder = Encoder.init(self.allocator);
+        defer encoder.deinit();
+        try encoder.command("AUTH OAUTHBEARER ");
+        try encoder.atom(initial);
+        try encoder.crlf();
+
+        const cmd = try encoder.finish();
+        defer self.allocator.free(cmd);
+
+        try self.transport.writeAll(cmd);
+        self.debugLog("C: AUTH OAUTHBEARER ***\n", .{});
+
+        var resp = try self.readResponse();
+        if (resp.code != response_mod.codes.auth_success) {
+            freeResp(self.allocator, &resp);
+            return SmtpClientError.AuthenticationFailed;
+        }
+        freeResp(self.allocator, &resp);
+    }
+
     // -----------------------------------------------------------------------
     // High-level convenience
     // -----------------------------------------------------------------------

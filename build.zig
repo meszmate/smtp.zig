@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_][]const u8{
         "simple_client",
         "simple_server",
+        "proxy",
     };
 
     for (examples) |example_name| {

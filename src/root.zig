@@ -11,6 +11,12 @@ pub const extension = @import("extension/root.zig");
 pub const auth = @import("auth/root.zig");
 pub const middleware = @import("middleware/root.zig");
 pub const mime = @import("mime/root.zig");
+pub const address = @import("address.zig");
+pub const dns = @import("dns.zig");
+pub const queue = @import("queue/root.zig");
+pub const spf = @import("spf.zig");
+pub const dmarc = @import("dmarc.zig");
+pub const arc = @import("arc.zig");
 pub const dkim = @import("dkim/root.zig");
 
 pub const ConnState = types.ConnState;
@@ -40,6 +46,15 @@ pub const caps = capability.caps;
 pub const CapabilitySet = capability.CapabilitySet;
 
 pub const commands = command.names;
+
+pub const EmailAddress = address.EmailAddress;
+pub const parseEmailAddress = address.parse;
+pub const isValidEmail = address.isValid;
+pub const normalizeEmail = address.normalizeAlloc;
+
+pub const MxRecord = dns.MxRecord;
+pub const lookupMx = dns.lookupMxAlloc;
+pub const bestMxHost = dns.bestMxHostAlloc;
 
 pub const response_codes = response.codes;
 pub const parseResponseLine = response.parseResponseLine;
