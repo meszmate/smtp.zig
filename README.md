@@ -110,6 +110,17 @@ const valid = smtp.isValidEmail("user@example.com");
 const addr = try smtp.parseEmailAddress("User Name <user@example.com>");
 ```
 
+### Parsing MIME Messages
+
+```zig
+var parsed = try smtp.mime.parseMessageAlloc(allocator, raw_message);
+defer parsed.deinit();
+
+if (parsed.root.children.len > 0) {
+    std.debug.print("first part type: {s}\n", .{parsed.root.children[0].content_type});
+}
+```
+
 ### MX Lookup
 
 ```zig
