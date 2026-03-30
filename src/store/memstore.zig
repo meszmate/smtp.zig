@@ -100,6 +100,13 @@ pub const MemStore = struct {
 
     /// Add a new user with the given credentials.
     pub fn addUser(self: *MemStore, username: []const u8, password: []const u8) !void {
+        if (self.users.get(username)) |existing| {
+            const new_password = try self.allocator.dupe(u8, password);
+            self.allocator.free(existing.password);
+            existing.password = new_password;
+            return;
+        }
+
         const user = try self.allocator.create(User);
         errdefer self.allocator.destroy(user);
 

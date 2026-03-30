@@ -6,6 +6,7 @@ const ExtensionManager = smtp.server.ExtensionManager;
 const ServerExtension = smtp.server.ServerExtension;
 const Dispatcher = smtp.server.Dispatcher;
 const CommandContext = smtp.server.CommandContext;
+const PipeTransport = smtp.smtptest.PipeTransport;
 
 // ---------------------------------------------------------------------------
 // SessionState tests
@@ -357,6 +358,51 @@ test "dispatcher: setFallback" {
 
     dispatcher.setFallback(Fb.handle);
     try std.testing.expect(dispatcher.fallback != null);
+}
+
+test "server: STARTTLS is not advertised without an upgrade handler" {
+    const allocator = std.testing.allocator;
+    var store = smtp.store.MemStore.init(allocator);
+    defer store.deinit();
+
+    var server = smtp.server.Server.initWithOptions(allocator, &store, .{
+        .enable_starttls = true,
+    });
+
+    var transport = PipeTransport.init(allocator);
+    defer transport.deinit();
+    try transport.feedInput("EHLO client.example\r\nSTARTTLS\r\nQUIT\r\n");
+
+    server.serveConnection(transport.transport(), std.mem.zeroes(std.net.Stream), false);
+
+    try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "250-STARTTLS") == null);
+    try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "502 5.5.1 STARTTLS not available\r\n") != null);
+}
+
+test "server: BDAT accumulates chunks until LAST" {
+    const allocator = std.testing.allocator;
+    var store = smtp.store.MemStore.init(allocator);
+    defer store.deinit();
+    try store.addUser("bob", "password");
+
+    var server = smtp.server.Server.init(allocator, &store);
+
+    var transport = PipeTransport.init(allocator);
+    defer transport.deinit();
+    try transport.feedInput(
+        "EHLO client.example\r\n" ++
+            "MAIL FROM:<alice@example.com>\r\n" ++
+            "RCPT TO:<bob@example.com>\r\n" ++
+            "BDAT 6\r\nHello \r\n" ++
+            "BDAT 5 LAST\r\nWorld\r\n" ++
+            "QUIT\r\n",
+    );
+
+    server.serveConnection(transport.transport(), std.mem.zeroes(std.net.Stream), false);
+
+    const user = store.users.get("bob").?;
+    try std.testing.expectEqual(@as(usize, 1), user.messages.items.len);
+    try std.testing.expectEqualStrings("Hello World", user.messages.items[0].body);
 }
 
 test "dispatcher: setMiddleware" {

@@ -2,6 +2,27 @@ const std = @import("std");
 const smtp = @import("smtp");
 
 const MemStore = smtp.store.MemStore;
+const PgStore = smtp.store.PgStore;
+const PgUser = smtp.store.PgUser;
+
+const ExecCapture = struct {
+    allocator: std.mem.Allocator,
+    last_sql: ?[]u8 = null,
+
+    fn deinit(self: *ExecCapture) void {
+        if (self.last_sql) |sql| {
+            self.allocator.free(sql);
+            self.last_sql = null;
+        }
+    }
+
+    fn exec(ctx: *anyopaque, allocator: std.mem.Allocator, _: smtp.store.PgStoreOptions, sql: []const u8) anyerror![]u8 {
+        const self: *ExecCapture = @ptrCast(@alignCast(ctx));
+        if (self.last_sql) |prev| allocator.free(prev);
+        self.last_sql = try allocator.dupe(u8, sql);
+        return try allocator.dupe(u8, "");
+    }
+};
 
 // ---------------------------------------------------------------------------
 // User management
@@ -31,6 +52,18 @@ test "memstore: addUser multiple users" {
     try std.testing.expect(store.users.get("alice") != null);
     try std.testing.expect(store.users.get("bob") != null);
     try std.testing.expect(store.users.get("charlie") != null);
+}
+
+test "memstore: addUser updates an existing password" {
+    const allocator = std.testing.allocator;
+    var store = MemStore.init(allocator);
+    defer store.deinit();
+
+    try store.addUser("alice", "old-password");
+    try store.addUser("alice", "new-password");
+
+    try std.testing.expect(store.authenticate("alice", "old-password") == null);
+    try std.testing.expect(store.authenticate("alice", "new-password") != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -215,4 +248,41 @@ test "memstore: User appendMessage" {
 
     try std.testing.expectEqual(@as(usize, 1), user.messages.items.len);
     try std.testing.expectEqualStrings("from@test.com", user.messages.items[0].from);
+}
+
+test "pgstore: deleteMessage renders a numeric id safely" {
+    const allocator = std.testing.allocator;
+    var capture = ExecCapture{ .allocator = allocator };
+    defer capture.deinit();
+
+    var store = PgStore.initWithExecutor(allocator, .{}, @ptrCast(&capture), ExecCapture.exec);
+    var user = PgUser{
+        .allocator = allocator,
+        .store = &store,
+        .username = try allocator.dupe(u8, "alice"),
+    };
+    defer user.deinit();
+
+    try user.deleteMessage("42");
+
+    try std.testing.expect(capture.last_sql != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.last_sql.?, "id = 42;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.last_sql.?, "'42'") == null);
+}
+
+test "pgstore: deleteMessage rejects non-numeric ids" {
+    const allocator = std.testing.allocator;
+    var capture = ExecCapture{ .allocator = allocator };
+    defer capture.deinit();
+
+    var store = PgStore.initWithExecutor(allocator, .{}, @ptrCast(&capture), ExecCapture.exec);
+    var user = PgUser{
+        .allocator = allocator,
+        .store = &store,
+        .username = try allocator.dupe(u8, "alice"),
+    };
+    defer user.deinit();
+
+    try std.testing.expectError(error.InvalidMessageId, user.deleteMessage("42 OR 1=1"));
+    try std.testing.expect(capture.last_sql == null);
 }

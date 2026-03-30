@@ -10,8 +10,8 @@ pub fn main() !void {
     var store = smtp.store.MemStore.init(allocator);
     defer store.deinit();
 
-    // Add a test user
-    try store.addUser("user@example.com", "password");
+    // Add a local mailbox that matches the recipient in simple_client.zig
+    try store.addUser("recipient", "password");
 
     // Create and configure the server
     var server = smtp.server.Server.init(allocator, &store);

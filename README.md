@@ -55,20 +55,22 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var cl = try smtp.client.Client.init(allocator, .{
-        .host = "smtp.example.com",
-        .port = 587,
-    });
-    defer cl.deinit();
+    var client = try smtp.client.Client.connectTcp(allocator, "smtp.example.com", 587);
+    defer client.deinit();
 
-    try cl.connect();
-    try cl.hello("localhost");
-    try cl.startTls();
-    try cl.authenticate(.plain, "user@example.com", "password");
-    try cl.mailFrom("sender@example.com", .{});
-    try cl.rcptTo("recipient@example.com", .{});
-    try cl.data("From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Hello\r\n\r\nHello, World!\r\n");
-    try cl.quit();
+    _ = try client.ehlo("localhost");
+    if (client.supportsStartTLS()) {
+        _ = try client.starttls(.{
+            .host_verification = .{ .explicit = "smtp.example.com" },
+        });
+    }
+    try client.authenticatePlain("user@example.com", "password");
+    _ = try client.sendMail(
+        "sender@example.com",
+        &.{"recipient@example.com"},
+        "From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Hello\r\n\r\nHello, World!\r\n",
+    );
+    _ = try client.quit();
 }
 ```
 
@@ -120,8 +122,8 @@ defer allocator.free(mx_host);
 Build and run examples:
 
 ```bash
-zig build run-simple-client
-zig build run-simple-server
+zig build run-simple_client
+zig build run-simple_server
 zig build run-proxy
 ```
 

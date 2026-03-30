@@ -56,6 +56,14 @@ pub const Server = struct {
         return self.is_shutdown;
     }
 
+    fn hasTlsUpgrade(self: *const Server) bool {
+        return self.options.tls_upgrade_fn != null and self.options.tls_upgrade_ctx != null;
+    }
+
+    fn canAdvertiseStarttls(self: *const Server, conn: *const Conn) bool {
+        return self.options.enable_starttls and self.hasTlsUpgrade() and !conn.session.is_tls;
+    }
+
     /// Serve a single SMTP connection. This is the main session loop.
     pub fn serveConnection(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool) void {
         var connection = Conn.init(self.allocator, transport);
@@ -161,12 +169,13 @@ pub const Server = struct {
         // Add capabilities.
         const caps = if (self.options.capabilities) |c|
             c
-        else if (self.options.enable_starttls and !conn.session.is_tls)
+        else if (self.canAdvertiseStarttls(conn))
             Options.starttlsCapabilities()
         else
             Options.defaultCapabilities();
 
         for (caps) |cap| {
+            if (!self.canAdvertiseStarttls(conn) and std.ascii.eqlIgnoreCase(cap, "STARTTLS")) continue;
             const cap_owned = try self.allocator.dupe(u8, cap);
             try lines.append(self.allocator, cap_owned);
         }
@@ -193,7 +202,7 @@ pub const Server = struct {
     }
 
     fn handleStarttls(self: *Server, conn: *Conn) !void {
-        if (!self.options.enable_starttls) {
+        if (!self.options.enable_starttls or !self.hasTlsUpgrade()) {
             try conn.writeError(codes.command_not_implemented, "5.5.1 STARTTLS not available");
             return;
         }
@@ -209,18 +218,14 @@ pub const Server = struct {
         // The upgrade function is responsible for replacing the transport layer
         // on the connection. It receives the opaque context that was configured
         // in the server options.
-        if (self.options.tls_upgrade_fn) |upgrade_fn| {
-            if (self.options.tls_upgrade_ctx) |ctx| {
-                const stream = conn.stream orelse {
-                    try conn.writeError(codes.local_error, "4.7.0 No underlying stream for TLS upgrade");
-                    return;
-                };
-                upgrade_fn(ctx, stream) catch {
-                    try conn.writeError(codes.local_error, "4.7.0 TLS negotiation failed");
-                    return;
-                };
-            }
-        }
+        const stream = conn.stream orelse {
+            try conn.writeError(codes.local_error, "4.7.0 No underlying stream for TLS upgrade");
+            return;
+        };
+        self.options.tls_upgrade_fn.?(self.options.tls_upgrade_ctx.?, stream) catch {
+            try conn.writeError(codes.local_error, "4.7.0 TLS negotiation failed");
+            return;
+        };
 
         conn.session.is_tls = true;
         // Reset session state after TLS upgrade (per RFC 3207).
@@ -565,20 +570,26 @@ pub const Server = struct {
         // Read trailing CRLF.
         conn.reader.readCrlf() catch {};
 
-        if (is_last) {
-            // Deliver the message with this final chunk.
-            const from = conn.session.from orelse "";
-            const recipients = conn.session.recipients.items;
-            _ = self.store.deliverMessage(from, recipients, chunk_data) catch {
-                try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
-                return;
-            };
-
-            try conn.writeOk("2.6.0 Message accepted for delivery");
-            conn.session.reset();
-        } else {
+        if (!is_last) {
+            try conn.session.appendBdatChunk(chunk_data);
             try conn.writeOk("2.0.0 Chunk received");
+            return;
         }
+
+        const body = if (conn.session.bdat_buffer.items.len > 0) blk: {
+            try conn.session.appendBdatChunk(chunk_data);
+            break :blk conn.session.bdat_buffer.items;
+        } else chunk_data;
+
+        const from = conn.session.from orelse "";
+        const recipients = conn.session.recipients.items;
+        _ = self.store.deliverMessage(from, recipients, body) catch {
+            try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
+            return;
+        };
+
+        try conn.writeOk("2.6.0 Message accepted for delivery");
+        conn.session.reset();
     }
 
     fn handleRset(_: *Server, conn: *Conn) !void {
