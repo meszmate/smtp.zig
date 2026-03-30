@@ -49,12 +49,12 @@ pub const Transport = struct {
 
     fn netStreamRead(context: *anyopaque, buffer: []u8) ReadError!usize {
         const stream: *std.net.Stream = @ptrCast(@alignCast(context));
-        return stream.read(buffer);
+        return @errorCast(std.posix.recv(stream.handle, buffer, 0));
     }
 
     fn netStreamWrite(context: *anyopaque, buffer: []const u8) WriteError!usize {
         const stream: *std.net.Stream = @ptrCast(@alignCast(context));
-        return stream.write(buffer);
+        return @errorCast(std.posix.send(stream.handle, buffer, 0));
     }
 
     fn netStreamClose(context: *anyopaque) void {

@@ -7,6 +7,16 @@ const ServerExtension = smtp.server.ServerExtension;
 const Dispatcher = smtp.server.Dispatcher;
 const CommandContext = smtp.server.CommandContext;
 const PipeTransport = smtp.smtptest.PipeTransport;
+const builtin = @import("builtin");
+
+fn dummyStream() std.net.Stream {
+    return .{
+        .handle = if (builtin.os.tag == .windows)
+            std.os.windows.ws2_32.INVALID_SOCKET
+        else
+            @as(std.posix.fd_t, -1),
+    };
+}
 
 // ---------------------------------------------------------------------------
 // SessionState tests
@@ -373,7 +383,7 @@ test "server: STARTTLS is not advertised without an upgrade handler" {
     defer transport.deinit();
     try transport.feedInput("EHLO client.example\r\nSTARTTLS\r\nQUIT\r\n");
 
-    server.serveConnection(transport.transport(), std.mem.zeroes(std.net.Stream), false);
+    server.serveConnection(transport.transport(), dummyStream(), false);
 
     try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "250-STARTTLS") == null);
     try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "502 5.5.1 STARTTLS not available\r\n") != null);
@@ -398,7 +408,7 @@ test "server: BDAT accumulates chunks until LAST" {
             "QUIT\r\n",
     );
 
-    server.serveConnection(transport.transport(), std.mem.zeroes(std.net.Stream), false);
+    server.serveConnection(transport.transport(), dummyStream(), false);
 
     const user = store.users.get("bob").?;
     try std.testing.expectEqual(@as(usize, 1), user.messages.items.len);
