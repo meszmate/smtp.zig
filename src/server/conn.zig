@@ -23,6 +23,7 @@ pub const Conn = struct {
     reader: LineReader,
     session: SessionState,
     stream: ?std.net.Stream = null,
+    client_id: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator, transport: Transport) Conn {
         return .{

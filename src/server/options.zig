@@ -1,8 +1,10 @@
 const std = @import("std");
+const policy_mod = @import("policy.zig");
 
 /// TLS upgrade function type. Takes a context and the underlying stream,
 /// returns a Transport wrapping the TLS connection.
 pub const TlsUpgradeFn = *const fn (ctx: *anyopaque, stream: std.net.Stream) anyerror!void;
+const PolicyEngine = policy_mod.Engine;
 
 /// Configuration options for the SMTP server.
 pub const Options = struct {
@@ -38,6 +40,9 @@ pub const Options = struct {
 
     /// Additional capabilities to advertise. If null, defaultCapabilities() is used.
     capabilities: ?[]const []const u8 = null,
+
+    /// Optional policy engine invoked during SMTP command processing.
+    policy_engine: ?*PolicyEngine = null,
 
     /// Returns the default set of ESMTP capabilities.
     pub fn defaultCapabilities() []const []const u8 {
