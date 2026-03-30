@@ -7,6 +7,7 @@ pub const extensions = @import("extensions.zig");
 pub const writers = @import("writers.zig");
 pub const tracker = @import("tracker.zig");
 pub const policy = @import("policy.zig");
+pub const stream = @import("stream.zig");
 
 pub const Server = server.Server;
 pub const Conn = conn.Conn;
@@ -27,3 +28,6 @@ pub const Policy = policy.Policy;
 pub const PolicyContext = policy.Context;
 pub const PolicyStage = policy.Stage;
 pub const PolicyRejection = policy.Rejection;
+pub const Envelope = stream.Envelope;
+pub const MessageStream = stream.MessageStream;
+pub const MessageStreamFactory = stream.MessageStreamFactory;

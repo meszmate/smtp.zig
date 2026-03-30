@@ -56,6 +56,8 @@ pub const Client = struct {
     /// Heap-allocated stream for plain TCP connections (so Transport's
     /// context pointer stays valid). Must be freed on deinit.
     heap_stream: ?*std.net.Stream,
+    data_prev_byte: ?u8,
+    data_last_byte: ?u8,
     options: Options,
 
     // -----------------------------------------------------------------------
@@ -77,6 +79,8 @@ pub const Client = struct {
             .is_tls = false,
             .owned_stream = null,
             .heap_stream = null,
+            .data_prev_byte = null,
+            .data_last_byte = null,
             .options = opts,
         };
 
@@ -298,6 +302,8 @@ pub const Client = struct {
         }
 
         self.state = .data;
+        self.data_prev_byte = null;
+        self.data_last_byte = null;
         return resp;
     }
 
@@ -306,20 +312,15 @@ pub const Client = struct {
     pub fn dataWrite(self: *Client, chunk: []const u8) !void {
         if (self.state != .data) return SmtpClientError.InvalidState;
         try self.transport.writeAll(chunk);
+        self.recordDataChunk(chunk);
     }
 
     /// Write body data with dot-stuffing applied automatically.
     pub fn dataWriteDotStuffed(self: *Client, body: []const u8) !void {
         if (self.state != .data) return SmtpClientError.InvalidState;
 
-        var encoder = Encoder.init(self.allocator);
-        defer encoder.deinit();
-        try encoder.dotStuff(body);
-
-        const stuffed = try encoder.finish();
-        defer self.allocator.free(stuffed);
-
-        try self.transport.writeAll(stuffed);
+        var at_line_start = self.data_last_byte == null or self.data_last_byte.? == '\n';
+        try self.dataWriteDotStuffedChunk(body, &at_line_start);
     }
 
     /// Send the DATA terminator (CRLF.CRLF), read the final response,
@@ -327,7 +328,9 @@ pub const Client = struct {
     pub fn dataEnd(self: *Client) !SmtpResponse {
         if (self.state != .data) return SmtpClientError.InvalidState;
 
-        try self.transport.writeAll("\r\n.\r\n");
+        const ends_with_crlf = self.data_prev_byte == '\r' and self.data_last_byte == '\n';
+        const terminator = if (self.data_last_byte == null or ends_with_crlf) ".\r\n" else "\r\n.\r\n";
+        try self.transport.writeAll(terminator);
         self.debugLog("C: .\n", .{});
 
         var resp = try self.readResponse();
@@ -337,6 +340,8 @@ pub const Client = struct {
         }
 
         self.state = .ready;
+        self.data_prev_byte = null;
+        self.data_last_byte = null;
         return resp;
     }
 
@@ -346,6 +351,22 @@ pub const Client = struct {
         freeResp(self.allocator, &start_resp);
 
         try self.dataWriteDotStuffed(body);
+        return try self.dataEnd();
+    }
+
+    /// Stream body data from a reader, applying dot-stuffing incrementally.
+    pub fn sendDataReader(self: *Client, reader: anytype) !SmtpResponse {
+        var start_resp = try self.dataStart();
+        freeResp(self.allocator, &start_resp);
+
+        var at_line_start = true;
+        var buffer: [8192]u8 = undefined;
+        while (true) {
+            const read = try reader.read(&buffer);
+            if (read == 0) break;
+            try self.dataWriteDotStuffedChunk(buffer[0..read], &at_line_start);
+        }
+
         return try self.dataEnd();
     }
 
@@ -387,6 +408,29 @@ pub const Client = struct {
             return SmtpClientError.UnexpectedResponse;
         }
         return resp;
+    }
+
+    /// Stream a CHUNKING transaction from a reader using BDAT.
+    pub fn sendBdatReader(self: *Client, reader: anytype) !SmtpResponse {
+        var current: [8192]u8 = undefined;
+        var next: [8192]u8 = undefined;
+
+        var current_len = try reader.read(&current);
+        if (current_len == 0) {
+            return try self.bdat("", true);
+        }
+
+        while (true) {
+            const next_len = try reader.read(&next);
+            var resp = try self.bdat(current[0..current_len], next_len == 0);
+            if (next_len == 0) {
+                return resp;
+            }
+
+            freeResp(self.allocator, &resp);
+            std.mem.swap([8192]u8, &current, &next);
+            current_len = next_len;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -776,6 +820,42 @@ pub const Client = struct {
             } else if (std.ascii.eqlIgnoreCase(ext_text, "SIZE")) {
                 self.max_size = 0;
             }
+        }
+    }
+
+    fn dataWriteDotStuffedChunk(self: *Client, chunk: []const u8, at_line_start: *bool) !void {
+        var segment_start: usize = 0;
+
+        for (chunk, 0..) |byte, index| {
+            if (at_line_start.* and byte == '.') {
+                if (segment_start < index) {
+                    try self.transport.writeAll(chunk[segment_start..index]);
+                    self.recordDataChunk(chunk[segment_start..index]);
+                }
+
+                try self.transport.writeAll(".");
+                self.recordDataChunk(".");
+                segment_start = index;
+                at_line_start.* = false;
+            }
+
+            if (byte == '\n') {
+                at_line_start.* = true;
+            } else if (byte != '\r') {
+                at_line_start.* = false;
+            }
+        }
+
+        if (segment_start < chunk.len) {
+            try self.transport.writeAll(chunk[segment_start..]);
+            self.recordDataChunk(chunk[segment_start..]);
+        }
+    }
+
+    fn recordDataChunk(self: *Client, chunk: []const u8) void {
+        for (chunk) |byte| {
+            self.data_prev_byte = self.data_last_byte;
+            self.data_last_byte = byte;
         }
     }
 
