@@ -6,6 +6,7 @@ pub const dispatch = @import("dispatch.zig");
 pub const extensions = @import("extensions.zig");
 pub const writers = @import("writers.zig");
 pub const tracker = @import("tracker.zig");
+pub const tls = @import("tls.zig");
 
 pub const Server = server.Server;
 pub const Conn = conn.Conn;
@@ -21,3 +22,6 @@ pub const ResponseWriter = writers.ResponseWriter;
 pub const StatusWriter = writers.StatusWriter;
 pub const SessionTracker = tracker.SessionTracker;
 pub const ServerTracker = tracker.ServerTracker;
+pub const TlsProvider = tls.TlsProvider;
+pub const TlsSession = tls.TlsSession;
+pub const ConnectionMode = tls.ConnectionMode;

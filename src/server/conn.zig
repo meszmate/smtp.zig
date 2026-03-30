@@ -3,10 +3,12 @@ const transport_mod = @import("../wire/transport.zig");
 const line_reader_mod = @import("../wire/line_reader.zig");
 const session_mod = @import("session.zig");
 const response = @import("../response.zig");
+const tls_mod = @import("tls.zig");
 
 const Transport = transport_mod.Transport;
 const LineReader = line_reader_mod.LineReader;
 const SessionState = session_mod.SessionState;
+const TlsSession = tls_mod.TlsSession;
 
 /// A parsed SMTP command from the client.
 pub const Command = struct {
@@ -23,6 +25,7 @@ pub const Conn = struct {
     reader: LineReader,
     session: SessionState,
     stream: ?std.net.Stream = null,
+    tls_session: ?*TlsSession = null,
 
     pub fn init(allocator: std.mem.Allocator, transport: Transport) Conn {
         return .{

@@ -1,8 +1,10 @@
 const std = @import("std");
+const tls_mod = @import("tls.zig");
 
 /// TLS upgrade function type. Takes a context and the underlying stream,
 /// returns a Transport wrapping the TLS connection.
 pub const TlsUpgradeFn = *const fn (ctx: *anyopaque, stream: std.net.Stream) anyerror!void;
+const TlsProvider = tls_mod.TlsProvider;
 
 /// Configuration options for the SMTP server.
 pub const Options = struct {
@@ -35,6 +37,9 @@ pub const Options = struct {
 
     /// Opaque context passed to the TLS upgrade function.
     tls_upgrade_ctx: ?*anyopaque = null,
+
+    /// First-class TLS provider for STARTTLS and implicit TLS entry points.
+    tls_provider: ?TlsProvider = null,
 
     /// Additional capabilities to advertise. If null, defaultCapabilities() is used.
     capabilities: ?[]const []const u8 = null,
