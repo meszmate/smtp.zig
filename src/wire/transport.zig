@@ -104,3 +104,35 @@ pub const Transport = struct {
         };
     }
 };
+
+pub fn applyStreamTimeouts(stream: std.net.Stream, read_timeout_ms: u64, write_timeout_ms: u64) std.posix.SetSockOptError!void {
+    if (!isValidStream(stream)) return;
+
+    if (read_timeout_ms > 0) {
+        try setStreamTimeout(stream.handle, std.posix.SO.RCVTIMEO, read_timeout_ms);
+    }
+    if (write_timeout_ms > 0) {
+        try setStreamTimeout(stream.handle, std.posix.SO.SNDTIMEO, write_timeout_ms);
+    }
+}
+
+fn isValidStream(stream: std.net.Stream) bool {
+    if (builtin.os.tag == .windows) {
+        return stream.handle != std.os.windows.ws2_32.INVALID_SOCKET;
+    }
+    return stream.handle >= 0;
+}
+
+fn setStreamTimeout(handle: std.net.Stream.Handle, optname: u32, timeout_ms: u64) std.posix.SetSockOptError!void {
+    if (builtin.os.tag == .windows) {
+        const timeout: u32 = @intCast(@min(timeout_ms, @as(u64, std.math.maxInt(u32))));
+        try std.posix.setsockopt(handle, std.posix.SOL.SOCKET, optname, std.mem.asBytes(&timeout));
+        return;
+    }
+
+    const timeout = std.posix.timeval{
+        .sec = @intCast(timeout_ms / std.time.ms_per_s),
+        .usec = @intCast((timeout_ms % std.time.ms_per_s) * std.time.us_per_ms),
+    };
+    try std.posix.setsockopt(handle, std.posix.SOL.SOCKET, optname, std.mem.asBytes(&timeout));
+}

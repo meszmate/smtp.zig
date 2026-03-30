@@ -126,6 +126,9 @@ pub const Server = struct {
         connection.stream = stream;
         connection.tls_session = tls_session;
         connection.client_id = client_id;
+        connection.reader.max_line_length = self.options.max_command_line_length;
+
+        transport_mod.applyStreamTimeouts(stream, self.options.read_timeout_ms, self.options.write_timeout_ms) catch {};
 
         connection.session.is_tls = is_tls;
 
@@ -137,6 +140,11 @@ pub const Server = struct {
             const result = connection.readCommandAlloc() catch |err| {
                 switch (err) {
                     error.EndOfStream => return,
+                    error.LineTooLong => {
+                        connection.writeError(codes.syntax_error, "5.5.2 Command line too long") catch {};
+                        connection.session.logout();
+                        return;
+                    },
                     else => return,
                 }
             };
@@ -291,6 +299,7 @@ pub const Server = struct {
             conn.tls_session = tls_session;
             conn.transport = tls_session.transport();
             conn.reader = LineReader.init(self.allocator, conn.transport);
+            conn.reader.max_line_length = self.options.max_command_line_length;
         } else {
             self.options.tls_upgrade_fn.?(self.options.tls_upgrade_ctx.?, stream) catch {
                 try conn.writeError(codes.local_error, "4.7.0 TLS negotiation failed");

@@ -83,6 +83,7 @@ pub const Client = struct {
             .data_last_byte = null,
             .options = opts,
         };
+        self.reader.max_line_length = opts.max_response_line_length;
 
         try self.readGreeting();
         return self;
@@ -90,6 +91,11 @@ pub const Client = struct {
 
     /// Connect over plain TCP to `host`:`port` and read the greeting.
     pub fn connectTcp(allocator: std.mem.Allocator, host: []const u8, port: u16) !Client {
+        return connectTcpWithOptions(allocator, host, port, .{});
+    }
+
+    /// Connect over plain TCP to `host`:`port` using the provided client options.
+    pub fn connectTcpWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16, opts: Options) !Client {
         const stream = try std.net.tcpConnectToHost(allocator, host, port);
         errdefer stream.close();
 
@@ -98,10 +104,11 @@ pub const Client = struct {
         const heap_stream = try allocator.create(std.net.Stream);
         errdefer allocator.destroy(heap_stream);
         heap_stream.* = std.net.Stream{ .handle = stream.handle };
+        try wire.applyStreamTimeouts(heap_stream.*, opts.read_timeout_ms, opts.write_timeout_ms);
 
         const transport = Transport.fromNetStream(heap_stream);
 
-        var self = try init(allocator, transport, .{});
+        var self = try init(allocator, transport, opts);
         self.owned_stream = heap_stream.*;
         self.heap_stream = heap_stream;
         return self;
@@ -109,17 +116,24 @@ pub const Client = struct {
 
     /// Connect over implicit TLS (typically port 465).
     pub fn connectTls(allocator: std.mem.Allocator, host: []const u8, port: u16, tls_opts: TlsOptions) !Client {
+        return connectTlsWithOptions(allocator, host, port, .{ .tls_options = tls_opts });
+    }
+
+    /// Connect over implicit TLS (typically port 465) using the provided client options.
+    pub fn connectTlsWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16, opts: Options) !Client {
+        const tls_opts = opts.tls_options orelse return error.TlsOptionsRequired;
         const stream = try std.net.tcpConnectToHost(allocator, host, port);
         errdefer stream.close();
 
         const net_stream = std.net.Stream{ .handle = stream.handle };
+        try wire.applyStreamTimeouts(net_stream, opts.read_timeout_ms, opts.write_timeout_ms);
 
         const tls = try TlsTransport.init(allocator, net_stream, tls_opts);
         errdefer tls.deinitAndClose();
 
         const transport = tls.transport();
 
-        var self = try init(allocator, transport, .{ .tls_options = tls_opts });
+        var self = try init(allocator, transport, opts);
         self.tls_state = tls;
         self.is_tls = true;
         self.owned_stream = net_stream;
@@ -517,6 +531,7 @@ pub const Client = struct {
         self.is_tls = true;
         self.transport = tls.transport();
         self.reader = LineReader.init(self.allocator, self.transport);
+        self.reader.max_line_length = self.options.max_response_line_length;
 
         // Capabilities must be re-discovered after STARTTLS.
         self.capabilities.clear();

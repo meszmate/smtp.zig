@@ -11,6 +11,9 @@ pub const Options = struct {
     /// Write timeout in milliseconds. 0 means no timeout.
     write_timeout_ms: u32 = 30_000,
 
+    /// Maximum SMTP response line length accepted from the server.
+    max_response_line_length: usize = 8 * 1024,
+
     /// When true, logs all SMTP commands and responses to stderr.
     debug_log: bool = false,
 

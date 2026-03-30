@@ -1,9 +1,11 @@
 const std = @import("std");
 const server_stream = @import("../server/stream.zig");
+const retry_mod = @import("retry.zig");
 
 const Envelope = server_stream.Envelope;
 const MessageStream = server_stream.MessageStream;
 const MessageStreamFactory = server_stream.MessageStreamFactory;
+const RetryPolicy = retry_mod.RetryPolicy;
 
 /// Message body storage that can live in memory or in a temporary file.
 pub const QueuedBody = union(enum) {
@@ -232,8 +234,7 @@ pub const Queue = struct {
         if (self.findById(id)) |msg| {
             msg.status = .failed;
             msg.attempts += 1;
-            if (msg.last_error) |e| self.allocator.free(e);
-            msg.last_error = self.allocator.dupe(u8, error_msg) catch null;
+            self.setLastError(msg, error_msg);
         }
     }
 
@@ -246,8 +247,33 @@ pub const Queue = struct {
             msg.status = .deferred;
             msg.attempts += 1;
             msg.next_retry_at = next_retry_at;
-            if (msg.last_error) |e| self.allocator.free(e);
-            msg.last_error = self.allocator.dupe(u8, error_msg) catch null;
+            self.setLastError(msg, error_msg);
+        }
+    }
+
+    /// Mark a message as deferred using a retry policy expressed in milliseconds.
+    /// If no further retries remain, the message is marked as permanently failed.
+    pub fn markDeferredWithPolicy(self: *Queue, id: u64, error_msg: []const u8, policy: RetryPolicy) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.findById(id)) |msg| {
+            msg.max_attempts = policy.max_attempts;
+            if (!policy.shouldRetry(msg.attempts)) {
+                msg.status = .failed;
+                msg.attempts += 1;
+                self.setLastError(msg, error_msg);
+                return;
+            }
+
+            const retry_attempt = msg.attempts + 1;
+            const delay_ms = policy.nextRetryDelay(retry_attempt);
+            const delay_seconds = @as(i64, @intCast(std.math.divCeil(u64, delay_ms, std.time.ms_per_s) catch unreachable));
+
+            msg.status = .deferred;
+            msg.attempts = retry_attempt;
+            msg.next_retry_at = std.time.timestamp() + delay_seconds;
+            self.setLastError(msg, error_msg);
         }
     }
 
@@ -308,6 +334,11 @@ pub const Queue = struct {
             if (msg.id == id) return msg;
         }
         return null;
+    }
+
+    fn setLastError(self: *Queue, msg: *QueuedMessage, error_msg: []const u8) void {
+        if (msg.last_error) |e| self.allocator.free(e);
+        msg.last_error = self.allocator.dupe(u8, error_msg) catch null;
     }
 };
 
@@ -630,4 +661,45 @@ test "Queue enqueueReader stores large bodies on disk" {
     const body = try msg.readBodyAlloc(allocator);
     defer allocator.free(body);
     try std.testing.expectEqualStrings("this body is larger than eight bytes", body);
+}
+
+test "Queue markDeferredWithPolicy converts retry delay to absolute queue time" {
+    const allocator = std.testing.allocator;
+    var q = Queue.init(allocator, .{});
+    defer q.deinit();
+
+    const id = try q.enqueue("a@b.com", &[_][]const u8{"c@d.com"}, "body");
+    _ = q.dequeue();
+
+    const before = std.time.timestamp();
+    q.markDeferredWithPolicy(id, "temp failure", .{
+        .max_attempts = 3,
+        .initial_delay_ms = 1500,
+        .max_delay_ms = 1500,
+    });
+    const after = std.time.timestamp();
+
+    const msg = q.findById(id).?;
+    try std.testing.expectEqual(MessageStatus.deferred, msg.status);
+    try std.testing.expectEqual(@as(u32, 1), msg.attempts);
+    try std.testing.expect(msg.next_retry_at >= before + 2);
+    try std.testing.expect(msg.next_retry_at <= after + 2);
+}
+
+test "Queue markDeferredWithPolicy marks exhausted retries as failed" {
+    const allocator = std.testing.allocator;
+    var q = Queue.init(allocator, .{});
+    defer q.deinit();
+
+    const id = try q.enqueue("a@b.com", &[_][]const u8{"c@d.com"}, "body");
+    const msg = q.dequeue().?;
+    msg.attempts = 2;
+
+    q.markDeferredWithPolicy(id, "still failing", .{
+        .max_attempts = 2,
+        .initial_delay_ms = 1000,
+        .max_delay_ms = 1000,
+    });
+
+    try std.testing.expectEqual(MessageStatus.failed, q.getStatus(id).?);
 }

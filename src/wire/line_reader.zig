@@ -5,6 +5,7 @@ const Transport = transport_mod.Transport;
 pub const LineReader = struct {
     allocator: std.mem.Allocator,
     transport_layer: Transport,
+    max_line_length: usize = std.math.maxInt(usize),
 
     pub fn init(allocator: std.mem.Allocator, transport_layer: Transport) LineReader {
         return .{
@@ -40,6 +41,9 @@ pub const LineReader = struct {
                 break;
             }
 
+            if (result.items.len >= self.max_line_length) {
+                return error.LineTooLong;
+            }
             try result.append(self.allocator, byte);
         }
 
