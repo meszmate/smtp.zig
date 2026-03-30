@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../types.zig");
 const response_mod = @import("../response.zig");
 const capability_mod = @import("../capability.zig");
@@ -479,8 +480,10 @@ pub const Client = struct {
         self.capabilities.clear();
 
         // Re-issue EHLO over the encrypted channel.
-        var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
-        const hostname = std.posix.gethostname(&hostname_buf) catch "localhost";
+        const hostname = if (builtin.os.tag == .windows) "localhost" else blk: {
+            var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+            break :blk std.posix.gethostname(&hostname_buf) catch "localhost";
+        };
         return try self.ehlo(hostname);
     }
 
