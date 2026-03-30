@@ -38,24 +38,24 @@ pub const PgStore = struct {
     pub fn deinit(_: *PgStore) void {}
 
     pub fn schemaSql() []const u8 {
-        return
-            \\CREATE TABLE IF NOT EXISTS smtp_users (
-            \\    username TEXT PRIMARY KEY,
-            \\    password TEXT NOT NULL
-            \\);
-            \\
-            \\CREATE TABLE IF NOT EXISTS smtp_messages (
-            \\    id BIGSERIAL PRIMARY KEY,
-            \\    username TEXT NOT NULL,
-            \\    mail_from TEXT NOT NULL,
-            \\    recipients TEXT NOT NULL,
-            \\    body TEXT NOT NULL,
-            \\    size BIGINT NOT NULL DEFAULT 0,
-            \\    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            \\    FOREIGN KEY (username) REFERENCES smtp_users(username) ON DELETE CASCADE
-            \\);
-            \\
-            \\CREATE INDEX IF NOT EXISTS idx_smtp_messages_user ON smtp_messages(username);
+        return 
+        \\CREATE TABLE IF NOT EXISTS smtp_users (
+        \\    username TEXT PRIMARY KEY,
+        \\    password TEXT NOT NULL
+        \\);
+        \\
+        \\CREATE TABLE IF NOT EXISTS smtp_messages (
+        \\    id BIGSERIAL PRIMARY KEY,
+        \\    username TEXT NOT NULL,
+        \\    mail_from TEXT NOT NULL,
+        \\    recipients TEXT NOT NULL,
+        \\    body TEXT NOT NULL,
+        \\    size BIGINT NOT NULL DEFAULT 0,
+        \\    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        \\    FOREIGN KEY (username) REFERENCES smtp_users(username) ON DELETE CASCADE
+        \\);
+        \\
+        \\CREATE INDEX IF NOT EXISTS idx_smtp_messages_user ON smtp_messages(username);
         ;
     }
 
@@ -188,12 +188,13 @@ pub const PgUser = struct {
     pub fn deleteMessage(self: *PgUser, message_id: []const u8) !void {
         const esc_user = try sqlEscapeAlloc(self.allocator, self.username);
         defer self.allocator.free(esc_user);
-        const esc_id = try sqlEscapeAlloc(self.allocator, message_id);
-        defer self.allocator.free(esc_id);
+        const parsed_id = std.fmt.parseInt(u64, std.mem.trim(u8, message_id, " \r\n\t"), 10) catch {
+            return error.InvalidMessageId;
+        };
         const sql = try std.fmt.allocPrint(
             self.allocator,
-            "DELETE FROM smtp_messages WHERE username = '{s}' AND id = {s};",
-            .{ esc_user, esc_id },
+            "DELETE FROM smtp_messages WHERE username = '{s}' AND id = {d};",
+            .{ esc_user, parsed_id },
         );
         defer self.allocator.free(sql);
         const out = try self.store.execSqlAlloc(sql);

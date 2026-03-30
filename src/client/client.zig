@@ -86,8 +86,7 @@ pub const Client = struct {
 
     /// Connect over plain TCP to `host`:`port` and read the greeting.
     pub fn connectTcp(allocator: std.mem.Allocator, host: []const u8, port: u16) !Client {
-        const addr = try std.net.Address.parseIp4(host, port);
-        const stream = try std.net.tcpConnectToAddress(addr);
+        const stream = try std.net.tcpConnectToHost(allocator, host, port);
         errdefer stream.close();
 
         // Heap-allocate the stream so the Transport's context pointer remains
@@ -106,8 +105,7 @@ pub const Client = struct {
 
     /// Connect over implicit TLS (typically port 465).
     pub fn connectTls(allocator: std.mem.Allocator, host: []const u8, port: u16, tls_opts: TlsOptions) !Client {
-        const addr = try std.net.Address.parseIp4(host, port);
-        const stream = try std.net.tcpConnectToAddress(addr);
+        const stream = try std.net.tcpConnectToHost(allocator, host, port);
         errdefer stream.close();
 
         const net_stream = std.net.Stream{ .handle = stream.handle };

@@ -29,6 +29,16 @@ pub fn build(b: *std.Build) void {
             }),
         });
         b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+        const run_step = b.step(
+            b.fmt("run-{s}", .{example_name}),
+            b.fmt("Run examples/{s}.zig", .{example_name}),
+        );
+        run_step.dependOn(&run_cmd.step);
     }
 
     const test_files = [_][]const u8{

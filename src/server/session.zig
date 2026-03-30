@@ -23,6 +23,9 @@ pub const SessionState = struct {
     /// RCPT TO recipients for the current transaction.
     recipients: std.ArrayList([]u8),
 
+    /// Buffered BDAT payload for CHUNKING transactions.
+    bdat_buffer: std.ArrayList(u8),
+
     /// Whether the connection is using TLS.
     is_tls: bool = false,
 
@@ -33,6 +36,7 @@ pub const SessionState = struct {
         return .{
             .allocator = allocator,
             .recipients = .empty,
+            .bdat_buffer = .empty,
         };
     }
 
@@ -40,6 +44,7 @@ pub const SessionState = struct {
         self.freeFrom();
         self.freeRecipients();
         self.recipients.deinit(self.allocator);
+        self.bdat_buffer.deinit(self.allocator);
         self.freeUsername();
         self.freeClientDomain();
     }
@@ -73,6 +78,7 @@ pub const SessionState = struct {
     pub fn reset(self: *SessionState) void {
         self.freeFrom();
         self.freeRecipients();
+        self.bdat_buffer.clearRetainingCapacity();
         self.from = null;
         if (self.state != .connect and self.state != .greeted) {
             self.state = .ready;
@@ -110,6 +116,11 @@ pub const SessionState = struct {
     /// Get recipient at index.
     pub fn getRecipient(self: *const SessionState, index: usize) []const u8 {
         return self.recipients.items[index];
+    }
+
+    /// Append a BDAT chunk to the buffered transaction body.
+    pub fn appendBdatChunk(self: *SessionState, chunk: []const u8) !void {
+        try self.bdat_buffer.appendSlice(self.allocator, chunk);
     }
 
     fn freeFrom(self: *SessionState) void {

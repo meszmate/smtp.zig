@@ -3,6 +3,13 @@ const smtp = @import("smtp");
 
 const CapabilitySet = smtp.CapabilitySet;
 const caps = smtp.caps;
+const Client = smtp.client.Client;
+
+fn writeGreeting(server: *std.net.Server) void {
+    const conn = server.accept() catch return;
+    defer conn.stream.close();
+    conn.stream.writeAll("220 localhost ESMTP ready\r\n") catch {};
+}
 
 // ---------------------------------------------------------------------------
 // Capability parsing tests (client-side capability management)
@@ -214,4 +221,22 @@ test "client: build RCPT TO command with DSN" {
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("RCPT TO:<user@example.com> NOTIFY=SUCCESS,FAILURE\r\n", result);
+}
+
+test "client: connectTcp resolves hostnames" {
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try address.listen(.{ .reuse_address = true });
+    const thread = try std.Thread.spawn(.{}, writeGreeting, .{&server});
+    errdefer {
+        server.deinit();
+        thread.join();
+    }
+
+    var client = try Client.connectTcp(std.testing.allocator, "localhost", server.listen_address.getPort());
+    defer client.deinit();
+
+    server.deinit();
+    thread.join();
+
+    try std.testing.expectEqual(smtp.ConnState.greeted, client.state);
 }
