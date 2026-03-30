@@ -7,6 +7,8 @@ const ServerExtension = smtp.server.ServerExtension;
 const Dispatcher = smtp.server.Dispatcher;
 const CommandContext = smtp.server.CommandContext;
 const PipeTransport = smtp.smtptest.PipeTransport;
+const Queue = smtp.queue.Queue;
+const QueueStreamFactory = smtp.queue.StreamFactory;
 const builtin = @import("builtin");
 
 fn dummyStream() std.net.Stream {
@@ -413,6 +415,45 @@ test "server: BDAT accumulates chunks until LAST" {
     const user = store.users.get("bob").?;
     try std.testing.expectEqual(@as(usize, 1), user.messages.items.len);
     try std.testing.expectEqualStrings("Hello World", user.messages.items[0].body);
+}
+
+test "server: DATA can stream directly into the queue" {
+    const allocator = std.testing.allocator;
+    var store = smtp.store.MemStore.init(allocator);
+    defer store.deinit();
+
+    var queue = Queue.init(allocator, .{
+        .streaming_memory_limit = 8,
+        .streaming_temp_dir = ".smtp-queue-server-test",
+    });
+    defer queue.deinit();
+
+    var stream_factory = QueueStreamFactory.init(&queue);
+    var server = smtp.server.Server.initWithOptions(allocator, &store, .{
+        .message_stream_factory = stream_factory.messageStreamFactory(),
+    });
+
+    var transport = PipeTransport.init(allocator);
+    defer transport.deinit();
+    try transport.feedInput(
+        "EHLO client.example\r\n" ++
+            "MAIL FROM:<alice@example.com>\r\n" ++
+            "RCPT TO:<bob@example.com>\r\n" ++
+            "DATA\r\n" ++
+            "hello from the streaming server path\r\n" ++
+            ".\r\n" ++
+            "QUIT\r\n",
+    );
+
+    server.serveConnection(transport.transport(), dummyStream(), false);
+
+    try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
+    const msg = queue.dequeue().?;
+    try std.testing.expect(msg.body.isOnDisk());
+
+    const body = try msg.readBodyAlloc(allocator);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("hello from the streaming server path\r\n", body);
 }
 
 test "dispatcher: setMiddleware" {

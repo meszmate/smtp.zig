@@ -6,6 +6,7 @@ pub const dispatch = @import("dispatch.zig");
 pub const extensions = @import("extensions.zig");
 pub const writers = @import("writers.zig");
 pub const tracker = @import("tracker.zig");
+pub const stream = @import("stream.zig");
 
 pub const Server = server.Server;
 pub const Conn = conn.Conn;
@@ -21,3 +22,6 @@ pub const ResponseWriter = writers.ResponseWriter;
 pub const StatusWriter = writers.StatusWriter;
 pub const SessionTracker = tracker.SessionTracker;
 pub const ServerTracker = tracker.ServerTracker;
+pub const Envelope = stream.Envelope;
+pub const MessageStream = stream.MessageStream;
+pub const MessageStreamFactory = stream.MessageStreamFactory;

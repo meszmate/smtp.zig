@@ -1,8 +1,10 @@
 const std = @import("std");
 const types = @import("../types.zig");
 const state_mod = @import("../state/machine.zig");
+const stream_mod = @import("stream.zig");
 
 pub const ConnState = types.ConnState;
+const MessageStream = stream_mod.MessageStream;
 
 /// Tracks the state of an SMTP session/transaction.
 pub const SessionState = struct {
@@ -32,6 +34,9 @@ pub const SessionState = struct {
     /// Client-provided EHLO/HELO domain.
     client_domain: ?[]const u8 = null,
 
+    /// Active streaming sink used by incremental DATA/BDAT handlers.
+    active_message_stream: ?MessageStream = null,
+
     pub fn init(allocator: std.mem.Allocator) SessionState {
         return .{
             .allocator = allocator,
@@ -47,6 +52,7 @@ pub const SessionState = struct {
         self.bdat_buffer.deinit(self.allocator);
         self.freeUsername();
         self.freeClientDomain();
+        self.abortActiveMessageStream();
     }
 
     /// Check if the given command verb is allowed in the current state.
@@ -76,6 +82,7 @@ pub const SessionState = struct {
 
     /// Reset the transaction state (RSET), keeping connection state.
     pub fn reset(self: *SessionState) void {
+        self.abortActiveMessageStream();
         self.freeFrom();
         self.freeRecipients();
         self.bdat_buffer.clearRetainingCapacity();
@@ -123,6 +130,14 @@ pub const SessionState = struct {
         try self.bdat_buffer.appendSlice(self.allocator, chunk);
     }
 
+    pub fn setActiveMessageStream(self: *SessionState, stream: MessageStream) void {
+        self.active_message_stream = stream;
+    }
+
+    pub fn clearActiveMessageStream(self: *SessionState) void {
+        self.active_message_stream = null;
+    }
+
     fn freeFrom(self: *SessionState) void {
         if (self.from) |f| {
             self.allocator.free(f);
@@ -148,6 +163,13 @@ pub const SessionState = struct {
         if (self.client_domain) |d| {
             self.allocator.free(@constCast(d));
             self.client_domain = null;
+        }
+    }
+
+    fn abortActiveMessageStream(self: *SessionState) void {
+        if (self.active_message_stream) |stream| {
+            stream.abort();
+            self.active_message_stream = null;
         }
     }
 };

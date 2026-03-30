@@ -6,6 +6,7 @@ A comprehensive SMTP library for Zig, providing client, server, and email securi
 
 - **SMTP Client** — Connect, authenticate, and send emails with TLS support
 - **SMTP Server** — Configurable server with middleware and extension support
+- **Streaming Message APIs** — Stream `DATA`/`BDAT` bodies from readers and route incoming mail into queue-backed sinks
 - **Authentication** — PLAIN, LOGIN, and OAUTHBEARER mechanisms
 - **DKIM** — Ed25519-SHA256 signing with header canonicalization
 - **SPF** — Sender Policy Framework validation
@@ -72,6 +73,20 @@ pub fn main() !void {
     );
     _ = try client.quit();
 }
+```
+
+### Streaming Large Message Bodies
+
+```zig
+var file = try std.fs.cwd().openFile("message.eml", .{});
+defer file.close();
+
+var read_buffer: [8192]u8 = undefined;
+var reader = file.reader(&read_buffer);
+
+_ = try client.mailFrom("sender@example.com", .{});
+_ = try client.rcptTo("recipient@example.com", .{});
+_ = try client.sendDataReader(reader.interface());
 ```
 
 ### Email Validation
