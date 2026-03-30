@@ -1,4 +1,7 @@
 const std = @import("std");
+const stream_mod = @import("stream.zig");
+
+const MessageStreamFactory = stream_mod.MessageStreamFactory;
 
 /// TLS upgrade function type. Takes a context and the underlying stream,
 /// returns a Transport wrapping the TLS connection.
@@ -38,6 +41,9 @@ pub const Options = struct {
 
     /// Additional capabilities to advertise. If null, defaultCapabilities() is used.
     capabilities: ?[]const []const u8 = null,
+
+    /// Optional streaming delivery hook for DATA/BDAT bodies.
+    message_stream_factory: ?MessageStreamFactory = null,
 
     /// Returns the default set of ESMTP capabilities.
     pub fn defaultCapabilities() []const []const u8 {

@@ -10,6 +10,7 @@ const auth_xoauth2 = @import("../auth/xoauth2.zig");
 const conn_mod = @import("conn.zig");
 const session_mod = @import("session.zig");
 const options_mod = @import("options.zig");
+const stream_mod = @import("stream.zig");
 const store_mod = @import("../store/memstore.zig");
 
 const Transport = transport_mod.Transport;
@@ -18,6 +19,8 @@ const Conn = conn_mod.Conn;
 const Command = conn_mod.Command;
 const SessionState = session_mod.SessionState;
 const Options = options_mod.Options;
+const Envelope = stream_mod.Envelope;
+const MessageStream = stream_mod.MessageStream;
 const MemStore = store_mod.MemStore;
 const codes = response_mod.codes;
 
@@ -485,6 +488,11 @@ pub const Server = struct {
     }
 
     fn handleData(self: *Server, conn: *Conn) !void {
+        if (self.options.message_stream_factory != null) {
+            try self.handleDataStream(conn);
+            return;
+        }
+
         try conn.writeResponse(codes.start_mail_input, "Start mail input; end with <CRLF>.<CRLF>");
 
         // Read message body until lone dot.
@@ -570,6 +578,11 @@ pub const Server = struct {
         // Read trailing CRLF.
         conn.reader.readCrlf() catch {};
 
+        if (self.options.message_stream_factory != null) {
+            try self.handleBdatStream(conn, chunk_data, is_last);
+            return;
+        }
+
         if (!is_last) {
             try conn.session.appendBdatChunk(chunk_data);
             try conn.writeOk("2.0.0 Chunk received");
@@ -587,6 +600,94 @@ pub const Server = struct {
             try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
             return;
         };
+
+        try conn.writeOk("2.6.0 Message accepted for delivery");
+        conn.session.reset();
+    }
+
+    fn handleDataStream(self: *Server, conn: *Conn) !void {
+        try conn.writeResponse(codes.start_mail_input, "Start mail input; end with <CRLF>.<CRLF>");
+
+        var stream = self.openMessageStream(conn) catch {
+            try conn.writeError(codes.local_error, "4.0.0 Failed to initialize message stream");
+            return;
+        };
+        var finished = false;
+        defer if (!finished) stream.abort();
+
+        var body_size: usize = 0;
+
+        while (true) {
+            const line = conn.reader.readLineAlloc() catch |err| {
+                switch (err) {
+                    error.EndOfStream => return,
+                    else => return,
+                }
+            };
+            defer self.allocator.free(line);
+
+            if (std.mem.eql(u8, line, ".")) {
+                break;
+            }
+
+            const actual_line = if (line.len > 0 and line[0] == '.') line[1..] else line;
+            const next_size = body_size + actual_line.len + 2;
+            if (self.options.max_message_size > 0 and next_size > self.options.max_message_size) {
+                try conn.writeError(codes.exceeded_storage, "5.3.4 Message too big");
+                while (true) {
+                    const drain = conn.reader.readLineAlloc() catch return;
+                    defer self.allocator.free(drain);
+                    if (std.mem.eql(u8, drain, ".")) break;
+                }
+                return;
+            }
+
+            try stream.write(actual_line);
+            try stream.write("\r\n");
+            body_size = next_size;
+        }
+
+        stream.finish() catch {
+            try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
+            return;
+        };
+        finished = true;
+
+        try conn.writeOk("2.6.0 Message accepted for delivery");
+        conn.session.reset();
+    }
+
+    fn handleBdatStream(self: *Server, conn: *Conn, chunk_data: []const u8, is_last: bool) !void {
+        const stream = if (conn.session.active_message_stream) |existing|
+            existing
+        else blk: {
+            const opened = self.openMessageStream(conn) catch {
+                try conn.writeError(codes.local_error, "4.0.0 Failed to initialize message stream");
+                return;
+            };
+            conn.session.setActiveMessageStream(opened);
+            break :blk opened;
+        };
+
+        errdefer {
+            if (conn.session.active_message_stream != null) {
+                conn.session.active_message_stream.?.abort();
+                conn.session.clearActiveMessageStream();
+            }
+        }
+
+        try stream.write(chunk_data);
+
+        if (!is_last) {
+            try conn.writeOk("2.0.0 Chunk received");
+            return;
+        }
+
+        stream.finish() catch {
+            try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
+            return;
+        };
+        conn.session.clearActiveMessageStream();
 
         try conn.writeOk("2.6.0 Message accepted for delivery");
         conn.session.reset();
@@ -615,7 +716,22 @@ pub const Server = struct {
         };
         try conn.writeMultiline(codes.help_message, &help_lines);
     }
+
+    fn openMessageStream(self: *Server, conn: *const Conn) !MessageStream {
+        const factory = self.options.message_stream_factory orelse return error.NoMessageStreamFactory;
+        return try factory.open(self.allocator, envelopeFromSession(&conn.session));
+    }
 };
+
+fn envelopeFromSession(session: *const SessionState) Envelope {
+    return .{
+        .from = session.from orelse "",
+        .recipients = session.recipients.items,
+        .username = session.username,
+        .client_domain = session.client_domain,
+        .is_tls = session.is_tls,
+    };
+}
 
 /// Extract an email address from angle brackets: <addr> -> addr.
 fn extractAddress(text: []const u8) ?[]const u8 {
