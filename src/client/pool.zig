@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const client_mod = @import("client.zig");
 const Client = client_mod.Client;
 const options_mod = @import("options.zig");
@@ -125,9 +126,10 @@ pub const Pool = struct {
         }
 
         // EHLO with our hostname.
-        const HOST_NAME_MAX = if (@hasDecl(std.posix, "HOST_NAME_MAX")) std.posix.HOST_NAME_MAX else 256;
-        var hostname_buf: [HOST_NAME_MAX]u8 = undefined;
-        const hostname = std.posix.gethostname(&hostname_buf) catch "localhost";
+        const hostname = if (builtin.os.tag == .windows) "localhost" else blk: {
+            var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+            break :blk std.posix.gethostname(&hostname_buf) catch "localhost";
+        };
         _ = try c.ehlo(hostname);
 
         // Authenticate if credentials are provided.
