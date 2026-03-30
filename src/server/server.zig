@@ -10,6 +10,7 @@ const auth_xoauth2 = @import("../auth/xoauth2.zig");
 const conn_mod = @import("conn.zig");
 const session_mod = @import("session.zig");
 const options_mod = @import("options.zig");
+const tls_mod = @import("tls.zig");
 const policy_mod = @import("policy.zig");
 const stream_mod = @import("stream.zig");
 const store_mod = @import("../store/memstore.zig");
@@ -20,6 +21,9 @@ const Conn = conn_mod.Conn;
 const Command = conn_mod.Command;
 const SessionState = session_mod.SessionState;
 const Options = options_mod.Options;
+const TlsProvider = tls_mod.TlsProvider;
+const TlsSession = tls_mod.TlsSession;
+const ConnectionMode = tls_mod.ConnectionMode;
 const Envelope = stream_mod.Envelope;
 const MessageStream = stream_mod.MessageStream;
 const MemStore = store_mod.MemStore;
@@ -64,7 +68,12 @@ pub const Server = struct {
     }
 
     fn hasTlsUpgrade(self: *const Server) bool {
-        return self.options.tls_upgrade_fn != null and self.options.tls_upgrade_ctx != null;
+        return (self.options.tls_provider != null and self.options.tls_provider.?.canUpgrade()) or
+            (self.options.tls_upgrade_fn != null and self.options.tls_upgrade_ctx != null);
+    }
+
+    fn hasImplicitTls(self: *const Server) bool {
+        return self.options.tls_provider != null and self.options.tls_provider.?.canAcceptImplicit();
     }
 
     fn canAdvertiseStarttls(self: *const Server, conn: *const Conn) bool {
@@ -73,13 +82,38 @@ pub const Server = struct {
 
     /// Serve a single SMTP connection. This is the main session loop.
     pub fn serveConnection(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool) void {
+        self.runConnection(transport, stream, is_tls, null);
+    }
+
+    /// Serve an accepted TCP connection using plaintext or implicit TLS.
+    pub fn serveAcceptedConnection(self: *Server, connection: std.net.Server.Connection, mode: ConnectionMode) !void {
+        switch (mode) {
+            .plaintext => {
+                const stream_ptr = try self.allocator.create(std.net.Stream);
+                defer self.allocator.destroy(stream_ptr);
+                stream_ptr.* = connection.stream;
+                self.runConnection(Transport.fromNetStream(stream_ptr), stream_ptr.*, false, null);
+            },
+            .implicit_tls => {
+                const provider = self.options.tls_provider orelse return error.TlsProviderNotConfigured;
+                if (!self.hasImplicitTls()) return error.TlsProviderNotConfigured;
+                const tls_session = try provider.acceptImplicit(self.allocator, connection.stream);
+                self.runConnection(tls_session.transport(), connection.stream, true, tls_session);
+            },
+        }
+    }
+
+    fn runConnection(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool, tls_session: ?*TlsSession) void {
         self.serveConnectionWithClientId(transport, stream, is_tls, "");
     }
 
     pub fn serveConnectionWithClientId(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool, client_id: []const u8) void {
         var connection = Conn.init(self.allocator, transport);
         defer connection.deinit();
+        defer if (connection.tls_session) |session| session.deinit();
+        defer connection.transport.close();
         connection.stream = stream;
+        connection.tls_session = tls_session;
         connection.client_id = client_id;
 
         connection.session.is_tls = is_tls;
@@ -238,10 +272,20 @@ pub const Server = struct {
             try conn.writeError(codes.local_error, "4.7.0 No underlying stream for TLS upgrade");
             return;
         };
-        self.options.tls_upgrade_fn.?(self.options.tls_upgrade_ctx.?, stream) catch {
-            try conn.writeError(codes.local_error, "4.7.0 TLS negotiation failed");
-            return;
-        };
+        if (self.options.tls_provider) |provider| {
+            const tls_session = provider.upgrade(self.allocator, stream) catch {
+                try conn.writeError(codes.local_error, "4.7.0 TLS negotiation failed");
+                return;
+            };
+            conn.tls_session = tls_session;
+            conn.transport = tls_session.transport();
+            conn.reader = LineReader.init(self.allocator, conn.transport);
+        } else {
+            self.options.tls_upgrade_fn.?(self.options.tls_upgrade_ctx.?, stream) catch {
+                try conn.writeError(codes.local_error, "4.7.0 TLS negotiation failed");
+                return;
+            };
+        }
 
         conn.session.is_tls = true;
         // Reset session state after TLS upgrade (per RFC 3207).

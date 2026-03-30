@@ -6,6 +6,9 @@ const ExtensionManager = smtp.server.ExtensionManager;
 const ServerExtension = smtp.server.ServerExtension;
 const Dispatcher = smtp.server.Dispatcher;
 const CommandContext = smtp.server.CommandContext;
+const TlsProvider = smtp.server.TlsProvider;
+const TlsSession = smtp.server.TlsSession;
+const ConnectionMode = smtp.server.ConnectionMode;
 const PipeTransport = smtp.smtptest.PipeTransport;
 const Queue = smtp.queue.Queue;
 const QueueStreamFactory = smtp.queue.StreamFactory;
@@ -19,6 +22,62 @@ fn dummyStream() std.net.Stream {
             @as(std.posix.fd_t, -1),
     };
 }
+
+const FakeTlsProviderContext = struct {
+    transport: *PipeTransport,
+    accept_calls: usize = 0,
+    upgrade_calls: usize = 0,
+
+    fn provider(self: *FakeTlsProviderContext) TlsProvider {
+        return .{
+            .context = @ptrCast(self),
+            .accept_fn = acceptFn,
+            .upgrade_fn = upgradeFn,
+        };
+    }
+
+    fn acceptFn(ctx: *anyopaque, allocator: std.mem.Allocator, _: std.net.Stream) !*TlsSession {
+        const self: *FakeTlsProviderContext = @ptrCast(@alignCast(ctx));
+        self.accept_calls += 1;
+        return try FakeTlsHandle.init(allocator, self.transport.transport());
+    }
+
+    fn upgradeFn(ctx: *anyopaque, allocator: std.mem.Allocator, _: std.net.Stream) !*TlsSession {
+        const self: *FakeTlsProviderContext = @ptrCast(@alignCast(ctx));
+        self.upgrade_calls += 1;
+        return try FakeTlsHandle.init(allocator, self.transport.transport());
+    }
+};
+
+const FakeTlsHandle = struct {
+    allocator: std.mem.Allocator,
+    transport_layer: smtp.wire.Transport,
+    session: TlsSession,
+
+    fn init(allocator: std.mem.Allocator, transport_layer: smtp.wire.Transport) !*TlsSession {
+        const self = try allocator.create(FakeTlsHandle);
+        self.* = .{
+            .allocator = allocator,
+            .transport_layer = transport_layer,
+            .session = .{
+                .context = @ptrCast(self),
+                .transport_fn = transportFn,
+                .deinit_fn = deinitFn,
+            },
+        };
+        return &self.session;
+    }
+
+    fn transportFn(ctx: *anyopaque) smtp.wire.Transport {
+        const self: *FakeTlsHandle = @ptrCast(@alignCast(ctx));
+        return self.transport_layer;
+    }
+
+    fn deinitFn(ctx: *anyopaque) void {
+        const self: *FakeTlsHandle = @ptrCast(@alignCast(ctx));
+        self.allocator.destroy(self);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // SessionState tests
@@ -417,6 +476,7 @@ test "server: BDAT accumulates chunks until LAST" {
     try std.testing.expectEqualStrings("Hello World", user.messages.items[0].body);
 }
 
+test "server: STARTTLS upgrades the transport with a TLS provider" {
 test "server: DATA can stream directly into the queue" {
     const allocator = std.testing.allocator;
     var store = smtp.store.MemStore.init(allocator);
@@ -437,6 +497,46 @@ test "server: DATA can stream directly into the queue" {
     defer transport.deinit();
     try transport.feedInput(
         "EHLO client.example\r\n" ++
+            "STARTTLS\r\n" ++
+            "EHLO client.example\r\n" ++
+            "QUIT\r\n",
+    );
+
+    var tls_ctx = FakeTlsProviderContext{ .transport = &transport };
+    var server = smtp.server.Server.initWithOptions(allocator, &store, .{
+        .enable_starttls = true,
+        .tls_provider = tls_ctx.provider(),
+    });
+
+    server.serveConnection(transport.transport(), dummyStream(), false);
+
+    try std.testing.expectEqual(@as(usize, 1), tls_ctx.upgrade_calls);
+    try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "220 2.0.0 Ready to start TLS\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "250 AUTH PLAIN LOGIN CRAM-MD5 XOAUTH2\r\n") != null);
+}
+
+test "server: implicit TLS connections can be served through the TLS provider" {
+    const allocator = std.testing.allocator;
+    var store = smtp.store.MemStore.init(allocator);
+    defer store.deinit();
+
+    var transport = PipeTransport.init(allocator);
+    defer transport.deinit();
+    try transport.feedInput("QUIT\r\n");
+
+    var tls_ctx = FakeTlsProviderContext{ .transport = &transport };
+    var server = smtp.server.Server.initWithOptions(allocator, &store, .{
+        .tls_provider = tls_ctx.provider(),
+    });
+
+    const connection = std.net.Server.Connection{
+        .stream = dummyStream(),
+        .address = undefined,
+    };
+    try server.serveAcceptedConnection(connection, .implicit_tls);
+
+    try std.testing.expectEqual(@as(usize, 1), tls_ctx.accept_calls);
+    try std.testing.expect(std.mem.startsWith(u8, transport.output.items, "220 localhost smtp.zig ESMTP ready\r\n"));
             "MAIL FROM:<alice@example.com>\r\n" ++
             "RCPT TO:<bob@example.com>\r\n" ++
             "DATA\r\n" ++

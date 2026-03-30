@@ -6,6 +6,7 @@ A comprehensive SMTP library for Zig, providing client, server, and email securi
 
 - **SMTP Client** — Connect, authenticate, and send emails with TLS support
 - **SMTP Server** — Configurable server with middleware and extension support
+- **TLS Server Integration** — First-class STARTTLS and implicit TLS provider hooks for accepted connections
 - **Streaming Message APIs** — Stream `DATA`/`BDAT` bodies from readers and route incoming mail into queue-backed sinks
 - **Authentication** — PLAIN, LOGIN, and OAUTHBEARER mechanisms
 - **DKIM** — Ed25519-SHA256 signing with header canonicalization
@@ -75,6 +76,14 @@ pub fn main() !void {
 }
 ```
 
+### Serving Accepted Connections
+
+```zig
+const smtp = @import("smtp");
+
+// Accept a TCP connection with std.net, then hand it to the server.
+const connection = try tcp_server.accept();
+try server.serveAcceptedConnection(connection, .plaintext);
 ### Streaming Large Message Bodies
 
 ```zig
