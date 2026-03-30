@@ -125,7 +125,8 @@ pub const Pool = struct {
         }
 
         // EHLO with our hostname.
-        var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+        const HOST_NAME_MAX = if (@hasDecl(std.posix, "HOST_NAME_MAX")) std.posix.HOST_NAME_MAX else 256;
+        var hostname_buf: [HOST_NAME_MAX]u8 = undefined;
         const hostname = std.posix.gethostname(&hostname_buf) catch "localhost";
         _ = try c.ehlo(hostname);
 
