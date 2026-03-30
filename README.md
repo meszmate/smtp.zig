@@ -1,5 +1,8 @@
 # smtp.zig
 
+[![CI](https://github.com/meszmate/smtp.zig/actions/workflows/ci.yml/badge.svg)](https://github.com/meszmate/smtp.zig/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A comprehensive SMTP library for Zig, providing client, server, and email security features.
 
 ## Features

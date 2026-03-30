@@ -104,10 +104,21 @@ pub const Server = struct {
     }
 
     fn runConnection(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool, tls_session: ?*TlsSession) void {
-        self.serveConnectionWithClientId(transport, stream, is_tls, "");
+        self.serveConnectionInternal(transport, stream, is_tls, "", tls_session);
     }
 
     pub fn serveConnectionWithClientId(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool, client_id: []const u8) void {
+        self.serveConnectionInternal(transport, stream, is_tls, client_id, null);
+    }
+
+    fn serveConnectionInternal(
+        self: *Server,
+        transport: Transport,
+        stream: std.net.Stream,
+        is_tls: bool,
+        client_id: []const u8,
+        tls_session: ?*TlsSession,
+    ) void {
         var connection = Conn.init(self.allocator, transport);
         defer connection.deinit();
         defer if (connection.tls_session) |session| session.deinit();
@@ -824,6 +835,8 @@ pub const Server = struct {
         if (rejection.code == 421) {
             conn.session.logout();
         }
+    }
+
     fn openMessageStream(self: *Server, conn: *const Conn) !MessageStream {
         const factory = self.options.message_stream_factory orelse return error.NoMessageStreamFactory;
         return try factory.open(self.allocator, envelopeFromSession(&conn.session));
