@@ -25,6 +25,9 @@ pub const Options = struct {
     /// Maximum number of recipients per message.
     max_recipients: u32 = 100,
 
+    /// Maximum SMTP command line length accepted from the client.
+    max_command_line_length: usize = 1000,
+
     /// Read timeout in milliseconds. 0 means no timeout.
     read_timeout_ms: u64 = 300_000,
 

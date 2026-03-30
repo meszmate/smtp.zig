@@ -119,9 +119,10 @@ pub const Pool = struct {
             self.allocator.destroy(dialed);
         } else {
             if (self.opts.client_options.tls_options) |tls_opts| {
-                c.* = try Client.connectTls(self.allocator, self.opts.host, self.opts.port, tls_opts);
+                _ = tls_opts;
+                c.* = try Client.connectTlsWithOptions(self.allocator, self.opts.host, self.opts.port, self.opts.client_options);
             } else {
-                c.* = try Client.connectTcp(self.allocator, self.opts.host, self.opts.port);
+                c.* = try Client.connectTcpWithOptions(self.allocator, self.opts.host, self.opts.port, self.opts.client_options);
             }
         }
 

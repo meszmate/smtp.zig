@@ -450,6 +450,24 @@ test "server: STARTTLS is not advertised without an upgrade handler" {
     try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "502 5.5.1 STARTTLS not available\r\n") != null);
 }
 
+test "server: overly long command lines are rejected" {
+    const allocator = std.testing.allocator;
+    var store = smtp.store.MemStore.init(allocator);
+    defer store.deinit();
+
+    var server = smtp.server.Server.initWithOptions(allocator, &store, .{
+        .max_command_line_length = 16,
+    });
+
+    var transport = PipeTransport.init(allocator);
+    defer transport.deinit();
+    try transport.feedInput("EHLO client.example\r\nQUIT\r\n");
+
+    server.serveConnection(transport.transport(), dummyStream(), false);
+
+    try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "500 5.5.2 Command line too long\r\n") != null);
+}
+
 test "server: BDAT accumulates chunks until LAST" {
     const allocator = std.testing.allocator;
     var store = smtp.store.MemStore.init(allocator);

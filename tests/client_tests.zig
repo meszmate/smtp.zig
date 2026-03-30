@@ -242,6 +242,32 @@ test "client: connectTcp resolves hostnames" {
     try std.testing.expectEqual(smtp.ConnState.greeted, client.state);
 }
 
+test "client: connectTcpWithOptions preserves connection settings" {
+    const address = try std.net.Address.parseIp("127.0.0.1", 0);
+    var server = try address.listen(.{ .reuse_address = true });
+    const thread = try std.Thread.spawn(.{}, writeGreeting, .{&server});
+    errdefer {
+        server.deinit();
+        thread.join();
+    }
+
+    var client = try Client.connectTcpWithOptions(std.testing.allocator, "localhost", server.listen_address.getPort(), .{
+        .read_timeout_ms = 1234,
+        .write_timeout_ms = 4321,
+        .max_response_line_length = 2048,
+        .debug_log = true,
+    });
+    defer client.deinit();
+
+    server.deinit();
+    thread.join();
+
+    try std.testing.expectEqual(@as(u32, 1234), client.options.read_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 4321), client.options.write_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 2048), client.reader.max_line_length);
+    try std.testing.expect(client.options.debug_log);
+}
+
 test "client: sendDataReader dot-stuffs incrementally" {
     const allocator = std.testing.allocator;
     var transport = PipeTransport.init(allocator);
