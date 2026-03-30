@@ -10,6 +10,7 @@ const auth_xoauth2 = @import("../auth/xoauth2.zig");
 const conn_mod = @import("conn.zig");
 const session_mod = @import("session.zig");
 const options_mod = @import("options.zig");
+const policy_mod = @import("policy.zig");
 const stream_mod = @import("stream.zig");
 const store_mod = @import("../store/memstore.zig");
 
@@ -23,6 +24,9 @@ const Envelope = stream_mod.Envelope;
 const MessageStream = stream_mod.MessageStream;
 const MemStore = store_mod.MemStore;
 const codes = response_mod.codes;
+const PolicyStage = policy_mod.Stage;
+const PolicyContext = policy_mod.Context;
+const PolicyRejection = policy_mod.Rejection;
 
 /// SMTP server that handles incoming connections.
 pub const Server = struct {
@@ -69,9 +73,14 @@ pub const Server = struct {
 
     /// Serve a single SMTP connection. This is the main session loop.
     pub fn serveConnection(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool) void {
+        self.serveConnectionWithClientId(transport, stream, is_tls, "");
+    }
+
+    pub fn serveConnectionWithClientId(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool, client_id: []const u8) void {
         var connection = Conn.init(self.allocator, transport);
         defer connection.deinit();
         connection.stream = stream;
+        connection.client_id = client_id;
 
         connection.session.is_tls = is_tls;
 
@@ -102,6 +111,10 @@ pub const Server = struct {
             upper_buf[i] = std.ascii.toUpper(c);
         }
         const verb = upper_buf[0..verb_len];
+
+        if (try self.applyPolicies(conn, .command, verb, cmd.args, null, null, null)) {
+            return;
+        }
 
         // Check if command is allowed in current state.
         if (!conn.session.canExecute(verb)) {
@@ -467,6 +480,10 @@ pub const Server = struct {
             }
         }
 
+        if (try self.applyPolicies(conn, .mail_from, "MAIL FROM", args, addr, null, null)) {
+            return;
+        }
+
         try conn.session.setFrom(addr);
         try conn.writeOk("2.1.0 Sender OK");
     }
@@ -480,6 +497,10 @@ pub const Server = struct {
         // Check recipient limit.
         if (conn.session.recipients.items.len >= self.options.max_recipients) {
             try conn.writeError(codes.insufficient_storage, "4.5.3 Too many recipients");
+            return;
+        }
+
+        if (try self.applyPolicies(conn, .rcpt_to, "RCPT TO", args, null, addr, null)) {
             return;
         }
 
@@ -535,6 +556,9 @@ pub const Server = struct {
         // Deliver the message.
         const from = conn.session.from orelse "";
         const recipients = conn.session.recipients.items;
+        if (try self.applyPolicies(conn, .message, "DATA", "", from, null, body.items)) {
+            return;
+        }
         _ = self.store.deliverMessage(from, recipients, body.items) catch {
             try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
             return;
@@ -596,6 +620,9 @@ pub const Server = struct {
 
         const from = conn.session.from orelse "";
         const recipients = conn.session.recipients.items;
+        if (try self.applyPolicies(conn, .message, "BDAT", args, from, null, body)) {
+            return;
+        }
         _ = self.store.deliverMessage(from, recipients, body) catch {
             try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
             return;
@@ -717,6 +744,42 @@ pub const Server = struct {
         try conn.writeMultiline(codes.help_message, &help_lines);
     }
 
+    fn applyPolicies(
+        self: *Server,
+        conn: *Conn,
+        stage: PolicyStage,
+        command: []const u8,
+        args: []const u8,
+        mail_from: ?[]const u8,
+        rcpt_to: ?[]const u8,
+        message: ?[]const u8,
+    ) !bool {
+        const engine = self.options.policy_engine orelse return false;
+        const ctx = PolicyContext{
+            .allocator = self.allocator,
+            .stage = stage,
+            .command = command,
+            .args = args,
+            .client_id = conn.client_id,
+            .timestamp_ms = std.time.milliTimestamp(),
+            .session = &conn.session,
+            .mail_from = mail_from,
+            .rcpt_to = rcpt_to,
+            .message = message,
+        };
+
+        if (try engine.evaluate(&ctx)) |rejection| {
+            try self.writePolicyRejection(conn, rejection);
+            return true;
+        }
+        return false;
+    }
+
+    fn writePolicyRejection(_: *Server, conn: *Conn, rejection: PolicyRejection) !void {
+        try conn.writeError(rejection.code, rejection.message);
+        if (rejection.code == 421) {
+            conn.session.logout();
+        }
     fn openMessageStream(self: *Server, conn: *const Conn) !MessageStream {
         const factory = self.options.message_stream_factory orelse return error.NoMessageStreamFactory;
         return try factory.open(self.allocator, envelopeFromSession(&conn.session));
