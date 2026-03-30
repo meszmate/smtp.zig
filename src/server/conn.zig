@@ -26,6 +26,7 @@ pub const Conn = struct {
     session: SessionState,
     stream: ?std.net.Stream = null,
     tls_session: ?*TlsSession = null,
+    client_id: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator, transport: Transport) Conn {
         return .{

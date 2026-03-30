@@ -1,4 +1,52 @@
 const std = @import("std");
+const server_stream = @import("../server/stream.zig");
+
+const Envelope = server_stream.Envelope;
+const MessageStream = server_stream.MessageStream;
+const MessageStreamFactory = server_stream.MessageStreamFactory;
+
+/// Message body storage that can live in memory or in a temporary file.
+pub const QueuedBody = union(enum) {
+    memory: []u8,
+    file_path: []u8,
+
+    pub fn deinit(self: *QueuedBody, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .memory => |bytes| allocator.free(bytes),
+            .file_path => |path| {
+                std.fs.cwd().deleteFile(path) catch {};
+                allocator.free(path);
+            },
+        }
+    }
+
+    pub fn readAllAlloc(self: QueuedBody, allocator: std.mem.Allocator) ![]u8 {
+        return switch (self) {
+            .memory => |bytes| allocator.dupe(u8, bytes),
+            .file_path => |path| blk: {
+                const stat = try std.fs.cwd().statFile(path);
+                break :blk try std.fs.cwd().readFileAlloc(allocator, path, @intCast(stat.size));
+            },
+        };
+    }
+
+    pub fn size(self: QueuedBody) !usize {
+        return switch (self) {
+            .memory => |bytes| bytes.len,
+            .file_path => |path| blk: {
+                const stat = try std.fs.cwd().statFile(path);
+                break :blk @intCast(stat.size);
+            },
+        };
+    }
+
+    pub fn isOnDisk(self: QueuedBody) bool {
+        return switch (self) {
+            .memory => false,
+            .file_path => true,
+        };
+    }
+};
 
 /// Status of a queued message.
 pub const MessageStatus = enum {
@@ -14,7 +62,7 @@ pub const QueuedMessage = struct {
     id: u64,
     from: []u8,
     recipients: [][]u8,
-    body: []u8,
+    body: QueuedBody,
     status: MessageStatus = .pending,
     attempts: u32 = 0,
     max_attempts: u32 = 5,
@@ -27,11 +75,15 @@ pub const QueuedMessage = struct {
         allocator.free(self.from);
         for (self.recipients) |r| allocator.free(r);
         allocator.free(self.recipients);
-        allocator.free(self.body);
+        self.body.deinit(allocator);
         if (self.last_error) |e| {
             allocator.free(e);
             self.last_error = null;
         }
+    }
+
+    pub fn readBodyAlloc(self: *const QueuedMessage, allocator: std.mem.Allocator) ![]u8 {
+        return try self.body.readAllAlloc(allocator);
     }
 };
 
@@ -40,6 +92,8 @@ pub const QueueOptions = struct {
     max_queue_size: usize = 10000,
     default_max_attempts: u32 = 5,
     flush_interval_ms: u64 = 60_000,
+    streaming_memory_limit: usize = 64 * 1024,
+    streaming_temp_dir: []const u8 = ".smtp-queue",
 };
 
 /// In-memory message queue with thread-safe access.
@@ -69,10 +123,36 @@ pub const Queue = struct {
 
     /// Add a message to the queue. Returns the assigned message ID.
     pub fn enqueue(self: *Queue, from: []const u8, recipients: []const []const u8, body: []const u8) !u64 {
+        const owned_body = try self.allocator.dupe(u8, body);
+        return try self.enqueueOwnedBody(from, recipients, .{ .memory = owned_body });
+    }
+
+    /// Add a message to the queue by reading it incrementally from a reader.
+    pub fn enqueueReader(self: *Queue, from: []const u8, recipients: []const []const u8, reader: anytype) !u64 {
+        var accumulator = BodyAccumulator.init(
+            self.allocator,
+            self.options.streaming_memory_limit,
+            self.options.streaming_temp_dir,
+        );
+        defer accumulator.deinit();
+
+        var buffer: [8192]u8 = undefined;
+        while (true) {
+            const read = try reader.read(&buffer);
+            if (read == 0) break;
+            try accumulator.write(buffer[0..read]);
+        }
+
+        return try self.enqueueOwnedBody(from, recipients, try accumulator.finish());
+    }
+
+    fn enqueueOwnedBody(self: *Queue, from: []const u8, recipients: []const []const u8, body: QueuedBody) !u64 {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         if (self.messages.items.len >= self.options.max_queue_size) {
+            var owned_body = body;
+            owned_body.deinit(self.allocator);
             return error.QueueFull;
         }
 
@@ -94,8 +174,8 @@ pub const Queue = struct {
             initialized = i + 1;
         }
 
-        const owned_body = try self.allocator.dupe(u8, body);
-        errdefer self.allocator.free(owned_body);
+        var owned_body = body;
+        errdefer owned_body.deinit(self.allocator);
 
         const now = std.time.timestamp();
 
@@ -231,6 +311,166 @@ pub const Queue = struct {
     }
 };
 
+pub const StreamFactory = struct {
+    queue: *Queue,
+
+    pub fn init(queue: *Queue) StreamFactory {
+        return .{ .queue = queue };
+    }
+
+    pub fn messageStreamFactory(self: *StreamFactory) MessageStreamFactory {
+        return .{
+            .context = @ptrCast(self),
+            .open_fn = openFn,
+        };
+    }
+
+    fn openFn(ctx: *anyopaque, allocator: std.mem.Allocator, envelope: Envelope) !MessageStream {
+        const self: *StreamFactory = @ptrCast(@alignCast(ctx));
+        const writer = try allocator.create(QueueMessageStream);
+        errdefer allocator.destroy(writer);
+
+        writer.* = .{
+            .allocator = allocator,
+            .queue = self.queue,
+            .from = envelope.from,
+            .recipients = envelope.recipients,
+            .accumulator = BodyAccumulator.init(
+                allocator,
+                self.queue.options.streaming_memory_limit,
+                self.queue.options.streaming_temp_dir,
+            ),
+        };
+
+        return .{
+            .context = @ptrCast(writer),
+            .write_fn = QueueMessageStream.writeFn,
+            .finish_fn = QueueMessageStream.finishFn,
+            .abort_fn = QueueMessageStream.abortFn,
+        };
+    }
+};
+
+const QueueMessageStream = struct {
+    allocator: std.mem.Allocator,
+    queue: *Queue,
+    from: []const u8,
+    recipients: []const []u8,
+    accumulator: BodyAccumulator,
+
+    fn writeFn(ctx: *anyopaque, chunk: []const u8) !void {
+        const self: *QueueMessageStream = @ptrCast(@alignCast(ctx));
+        try self.accumulator.write(chunk);
+    }
+
+    fn finishFn(ctx: *anyopaque) !void {
+        const self: *QueueMessageStream = @ptrCast(@alignCast(ctx));
+        defer self.allocator.destroy(self);
+
+        var accumulator = self.accumulator;
+        self.accumulator = BodyAccumulator.init(
+            self.allocator,
+            self.queue.options.streaming_memory_limit,
+            self.queue.options.streaming_temp_dir,
+        );
+        errdefer accumulator.deinit();
+
+        _ = try self.queue.enqueueOwnedBody(self.from, self.recipients, try accumulator.finish());
+    }
+
+    fn abortFn(ctx: *anyopaque) void {
+        const self: *QueueMessageStream = @ptrCast(@alignCast(ctx));
+        self.accumulator.deinit();
+        self.allocator.destroy(self);
+    }
+};
+
+const BodyAccumulator = struct {
+    allocator: std.mem.Allocator,
+    memory_limit: usize,
+    temp_dir: []const u8,
+    buffer: std.ArrayList(u8) = .empty,
+    temp_file: ?std.fs.File = null,
+    temp_path: ?[]u8 = null,
+
+    fn init(allocator: std.mem.Allocator, memory_limit: usize, temp_dir: []const u8) BodyAccumulator {
+        return .{
+            .allocator = allocator,
+            .memory_limit = memory_limit,
+            .temp_dir = temp_dir,
+        };
+    }
+
+    fn deinit(self: *BodyAccumulator) void {
+        if (self.temp_file) |file| {
+            file.close();
+            self.temp_file = null;
+        }
+        if (self.temp_path) |path| {
+            std.fs.cwd().deleteFile(path) catch {};
+            self.allocator.free(path);
+            self.temp_path = null;
+        }
+        self.buffer.deinit(self.allocator);
+    }
+
+    fn write(self: *BodyAccumulator, chunk: []const u8) !void {
+        if (self.temp_file == null and self.buffer.items.len + chunk.len > self.memory_limit) {
+            try self.spillToDisk();
+        }
+
+        if (self.temp_file) |*file| {
+            try file.writeAll(chunk);
+        } else {
+            try self.buffer.appendSlice(self.allocator, chunk);
+        }
+    }
+
+    fn finish(self: *BodyAccumulator) !QueuedBody {
+        if (self.temp_file) |file| {
+            file.close();
+            self.temp_file = null;
+            const path = self.temp_path orelse unreachable;
+            self.temp_path = null;
+            self.buffer.deinit(self.allocator);
+            self.buffer = .empty;
+            return .{ .file_path = path };
+        }
+
+        const bytes = try self.buffer.toOwnedSlice(self.allocator);
+        self.buffer = .empty;
+        return .{ .memory = bytes };
+    }
+
+    fn spillToDisk(self: *BodyAccumulator) !void {
+        try std.fs.cwd().makePath(self.temp_dir);
+        const path = try tempPathAlloc(self.allocator, self.temp_dir);
+        errdefer self.allocator.free(path);
+
+        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        errdefer {
+            file.close();
+            std.fs.cwd().deleteFile(path) catch {};
+        }
+
+        if (self.buffer.items.len > 0) {
+            try file.writeAll(self.buffer.items);
+            self.buffer.clearRetainingCapacity();
+        }
+
+        self.temp_file = file;
+        self.temp_path = path;
+    }
+};
+
+fn tempPathAlloc(allocator: std.mem.Allocator, temp_dir: []const u8) ![]u8 {
+    const random_value = std.crypto.random.int(u64);
+    const filename = try std.fmt.allocPrint(allocator, "queue-{d}-{x}.eml", .{ std.time.milliTimestamp(), random_value });
+    defer allocator.free(filename);
+
+    return try std.fs.path.join(allocator, &.{ temp_dir, filename });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -251,7 +491,9 @@ test "Queue enqueue and dequeue" {
     try std.testing.expectEqualStrings("alice@example.com", msg.from);
     try std.testing.expectEqual(@as(usize, 2), msg.recipients.len);
     try std.testing.expectEqualStrings("bob@example.com", msg.recipients[0]);
-    try std.testing.expectEqualStrings("Hello, world!", msg.body);
+    const body = try msg.readBodyAlloc(allocator);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("Hello, world!", body);
 }
 
 test "Queue markSent" {
@@ -364,9 +606,28 @@ test "QueuedMessage deinit frees all fields" {
         .id = 1,
         .from = try allocator.dupe(u8, "alice@example.com"),
         .recipients = recipients,
-        .body = try allocator.dupe(u8, "test body"),
+        .body = .{ .memory = try allocator.dupe(u8, "test body") },
         .created_at = 0,
         .last_error = try allocator.dupe(u8, "some error"),
     };
     msg.deinit(allocator);
+}
+
+test "Queue enqueueReader stores large bodies on disk" {
+    const allocator = std.testing.allocator;
+    var q = Queue.init(allocator, .{
+        .streaming_memory_limit = 8,
+        .streaming_temp_dir = ".smtp-queue-test",
+    });
+    defer q.deinit();
+
+    var stream = std.io.fixedBufferStream("this body is larger than eight bytes");
+    const id = try q.enqueueReader("a@b.com", &[_][]const u8{"c@d.com"}, stream.reader());
+
+    const msg = q.findById(id).?;
+    try std.testing.expect(msg.body.isOnDisk());
+
+    const body = try msg.readBodyAlloc(allocator);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("this body is larger than eight bytes", body);
 }

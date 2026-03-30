@@ -11,6 +11,8 @@ const conn_mod = @import("conn.zig");
 const session_mod = @import("session.zig");
 const options_mod = @import("options.zig");
 const tls_mod = @import("tls.zig");
+const policy_mod = @import("policy.zig");
+const stream_mod = @import("stream.zig");
 const store_mod = @import("../store/memstore.zig");
 
 const Transport = transport_mod.Transport;
@@ -22,8 +24,13 @@ const Options = options_mod.Options;
 const TlsProvider = tls_mod.TlsProvider;
 const TlsSession = tls_mod.TlsSession;
 const ConnectionMode = tls_mod.ConnectionMode;
+const Envelope = stream_mod.Envelope;
+const MessageStream = stream_mod.MessageStream;
 const MemStore = store_mod.MemStore;
 const codes = response_mod.codes;
+const PolicyStage = policy_mod.Stage;
+const PolicyContext = policy_mod.Context;
+const PolicyRejection = policy_mod.Rejection;
 
 /// SMTP server that handles incoming connections.
 pub const Server = struct {
@@ -97,12 +104,17 @@ pub const Server = struct {
     }
 
     fn runConnection(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool, tls_session: ?*TlsSession) void {
+        self.serveConnectionWithClientId(transport, stream, is_tls, "");
+    }
+
+    pub fn serveConnectionWithClientId(self: *Server, transport: Transport, stream: std.net.Stream, is_tls: bool, client_id: []const u8) void {
         var connection = Conn.init(self.allocator, transport);
         defer connection.deinit();
         defer if (connection.tls_session) |session| session.deinit();
         defer connection.transport.close();
         connection.stream = stream;
         connection.tls_session = tls_session;
+        connection.client_id = client_id;
 
         connection.session.is_tls = is_tls;
 
@@ -133,6 +145,10 @@ pub const Server = struct {
             upper_buf[i] = std.ascii.toUpper(c);
         }
         const verb = upper_buf[0..verb_len];
+
+        if (try self.applyPolicies(conn, .command, verb, cmd.args, null, null, null)) {
+            return;
+        }
 
         // Check if command is allowed in current state.
         if (!conn.session.canExecute(verb)) {
@@ -508,6 +524,10 @@ pub const Server = struct {
             }
         }
 
+        if (try self.applyPolicies(conn, .mail_from, "MAIL FROM", args, addr, null, null)) {
+            return;
+        }
+
         try conn.session.setFrom(addr);
         try conn.writeOk("2.1.0 Sender OK");
     }
@@ -524,11 +544,20 @@ pub const Server = struct {
             return;
         }
 
+        if (try self.applyPolicies(conn, .rcpt_to, "RCPT TO", args, null, addr, null)) {
+            return;
+        }
+
         try conn.session.addRecipient(addr);
         try conn.writeOk("2.1.5 Recipient OK");
     }
 
     fn handleData(self: *Server, conn: *Conn) !void {
+        if (self.options.message_stream_factory != null) {
+            try self.handleDataStream(conn);
+            return;
+        }
+
         try conn.writeResponse(codes.start_mail_input, "Start mail input; end with <CRLF>.<CRLF>");
 
         // Read message body until lone dot.
@@ -571,6 +600,9 @@ pub const Server = struct {
         // Deliver the message.
         const from = conn.session.from orelse "";
         const recipients = conn.session.recipients.items;
+        if (try self.applyPolicies(conn, .message, "DATA", "", from, null, body.items)) {
+            return;
+        }
         _ = self.store.deliverMessage(from, recipients, body.items) catch {
             try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
             return;
@@ -614,6 +646,11 @@ pub const Server = struct {
         // Read trailing CRLF.
         conn.reader.readCrlf() catch {};
 
+        if (self.options.message_stream_factory != null) {
+            try self.handleBdatStream(conn, chunk_data, is_last);
+            return;
+        }
+
         if (!is_last) {
             try conn.session.appendBdatChunk(chunk_data);
             try conn.writeOk("2.0.0 Chunk received");
@@ -627,10 +664,101 @@ pub const Server = struct {
 
         const from = conn.session.from orelse "";
         const recipients = conn.session.recipients.items;
+        if (try self.applyPolicies(conn, .message, "BDAT", args, from, null, body)) {
+            return;
+        }
         _ = self.store.deliverMessage(from, recipients, body) catch {
             try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
             return;
         };
+
+        try conn.writeOk("2.6.0 Message accepted for delivery");
+        conn.session.reset();
+    }
+
+    fn handleDataStream(self: *Server, conn: *Conn) !void {
+        try conn.writeResponse(codes.start_mail_input, "Start mail input; end with <CRLF>.<CRLF>");
+
+        var stream = self.openMessageStream(conn) catch {
+            try conn.writeError(codes.local_error, "4.0.0 Failed to initialize message stream");
+            return;
+        };
+        var finished = false;
+        defer if (!finished) stream.abort();
+
+        var body_size: usize = 0;
+
+        while (true) {
+            const line = conn.reader.readLineAlloc() catch |err| {
+                switch (err) {
+                    error.EndOfStream => return,
+                    else => return,
+                }
+            };
+            defer self.allocator.free(line);
+
+            if (std.mem.eql(u8, line, ".")) {
+                break;
+            }
+
+            const actual_line = if (line.len > 0 and line[0] == '.') line[1..] else line;
+            const next_size = body_size + actual_line.len + 2;
+            if (self.options.max_message_size > 0 and next_size > self.options.max_message_size) {
+                try conn.writeError(codes.exceeded_storage, "5.3.4 Message too big");
+                while (true) {
+                    const drain = conn.reader.readLineAlloc() catch return;
+                    defer self.allocator.free(drain);
+                    if (std.mem.eql(u8, drain, ".")) break;
+                }
+                return;
+            }
+
+            try stream.write(actual_line);
+            try stream.write("\r\n");
+            body_size = next_size;
+        }
+
+        stream.finish() catch {
+            try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
+            return;
+        };
+        finished = true;
+
+        try conn.writeOk("2.6.0 Message accepted for delivery");
+        conn.session.reset();
+    }
+
+    fn handleBdatStream(self: *Server, conn: *Conn, chunk_data: []const u8, is_last: bool) !void {
+        const stream = if (conn.session.active_message_stream) |existing|
+            existing
+        else blk: {
+            const opened = self.openMessageStream(conn) catch {
+                try conn.writeError(codes.local_error, "4.0.0 Failed to initialize message stream");
+                return;
+            };
+            conn.session.setActiveMessageStream(opened);
+            break :blk opened;
+        };
+
+        errdefer {
+            if (conn.session.active_message_stream != null) {
+                conn.session.active_message_stream.?.abort();
+                conn.session.clearActiveMessageStream();
+            }
+        }
+
+        try stream.write(chunk_data);
+
+        if (!is_last) {
+            try conn.writeOk("2.0.0 Chunk received");
+            return;
+        }
+
+        stream.finish() catch {
+            try conn.writeError(codes.local_error, "4.0.0 Delivery failed");
+            return;
+        };
+        conn.session.clearActiveMessageStream();
 
         try conn.writeOk("2.6.0 Message accepted for delivery");
         conn.session.reset();
@@ -659,7 +787,58 @@ pub const Server = struct {
         };
         try conn.writeMultiline(codes.help_message, &help_lines);
     }
+
+    fn applyPolicies(
+        self: *Server,
+        conn: *Conn,
+        stage: PolicyStage,
+        command: []const u8,
+        args: []const u8,
+        mail_from: ?[]const u8,
+        rcpt_to: ?[]const u8,
+        message: ?[]const u8,
+    ) !bool {
+        const engine = self.options.policy_engine orelse return false;
+        const ctx = PolicyContext{
+            .allocator = self.allocator,
+            .stage = stage,
+            .command = command,
+            .args = args,
+            .client_id = conn.client_id,
+            .timestamp_ms = std.time.milliTimestamp(),
+            .session = &conn.session,
+            .mail_from = mail_from,
+            .rcpt_to = rcpt_to,
+            .message = message,
+        };
+
+        if (try engine.evaluate(&ctx)) |rejection| {
+            try self.writePolicyRejection(conn, rejection);
+            return true;
+        }
+        return false;
+    }
+
+    fn writePolicyRejection(_: *Server, conn: *Conn, rejection: PolicyRejection) !void {
+        try conn.writeError(rejection.code, rejection.message);
+        if (rejection.code == 421) {
+            conn.session.logout();
+        }
+    fn openMessageStream(self: *Server, conn: *const Conn) !MessageStream {
+        const factory = self.options.message_stream_factory orelse return error.NoMessageStreamFactory;
+        return try factory.open(self.allocator, envelopeFromSession(&conn.session));
+    }
 };
+
+fn envelopeFromSession(session: *const SessionState) Envelope {
+    return .{
+        .from = session.from orelse "",
+        .recipients = session.recipients.items,
+        .username = session.username,
+        .client_domain = session.client_domain,
+        .is_tls = session.is_tls,
+    };
+}
 
 /// Extract an email address from angle brackets: <addr> -> addr.
 fn extractAddress(text: []const u8) ?[]const u8 {

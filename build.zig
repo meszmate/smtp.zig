@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) void {
         "tests/store_tests.zig",
         "tests/store_interface_tests.zig",
         "tests/middleware_tests.zig",
+        "tests/policy_tests.zig",
         "tests/mime_tests.zig",
         "tests/dkim_tests.zig",
     };

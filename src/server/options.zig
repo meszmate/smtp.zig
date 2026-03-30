@@ -1,10 +1,15 @@
 const std = @import("std");
 const tls_mod = @import("tls.zig");
+const policy_mod = @import("policy.zig");
+const stream_mod = @import("stream.zig");
+
+const MessageStreamFactory = stream_mod.MessageStreamFactory;
 
 /// TLS upgrade function type. Takes a context and the underlying stream,
 /// returns a Transport wrapping the TLS connection.
 pub const TlsUpgradeFn = *const fn (ctx: *anyopaque, stream: std.net.Stream) anyerror!void;
 const TlsProvider = tls_mod.TlsProvider;
+const PolicyEngine = policy_mod.Engine;
 
 /// Configuration options for the SMTP server.
 pub const Options = struct {
@@ -43,6 +48,11 @@ pub const Options = struct {
 
     /// Additional capabilities to advertise. If null, defaultCapabilities() is used.
     capabilities: ?[]const []const u8 = null,
+
+    /// Optional policy engine invoked during SMTP command processing.
+    policy_engine: ?*PolicyEngine = null,
+    /// Optional streaming delivery hook for DATA/BDAT bodies.
+    message_stream_factory: ?MessageStreamFactory = null,
 
     /// Returns the default set of ESMTP capabilities.
     pub fn defaultCapabilities() []const []const u8 {

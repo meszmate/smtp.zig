@@ -4,6 +4,7 @@ const smtp = @import("smtp");
 const CapabilitySet = smtp.CapabilitySet;
 const caps = smtp.caps;
 const Client = smtp.client.Client;
+const PipeTransport = smtp.smtptest.PipeTransport;
 
 fn writeGreeting(server: *std.net.Server) void {
     const conn = server.accept() catch return;
@@ -239,4 +240,57 @@ test "client: connectTcp resolves hostnames" {
     thread.join();
 
     try std.testing.expectEqual(smtp.ConnState.greeted, client.state);
+}
+
+test "client: sendDataReader dot-stuffs incrementally" {
+    const allocator = std.testing.allocator;
+    var transport = PipeTransport.init(allocator);
+    defer transport.deinit();
+
+    try transport.feedInput(
+        "220 localhost ESMTP ready\r\n" ++
+            "250-localhost Hello client\r\n" ++
+            "250 CHUNKING\r\n" ++
+            "354 Start mail input\r\n" ++
+            "250 2.6.0 Message accepted for delivery\r\n",
+    );
+
+    var client = try Client.init(allocator, transport.transport(), .{});
+    defer client.deinit();
+
+    var ehlo_resp = try client.ehlo("client");
+    defer smtp.freeResponse(allocator, &ehlo_resp);
+    client.state = .rcpt;
+
+    var source = std.io.fixedBufferStream(".leading line\r\n..already stuffed\r\n");
+    var resp = try client.sendDataReader(source.reader());
+    defer smtp.freeResponse(allocator, &resp);
+
+    try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "DATA\r\n..leading line\r\n...already stuffed\r\n.\r\n") != null);
+}
+
+test "client: sendBdatReader streams a final LAST chunk" {
+    const allocator = std.testing.allocator;
+    var transport = PipeTransport.init(allocator);
+    defer transport.deinit();
+
+    try transport.feedInput(
+        "220 localhost ESMTP ready\r\n" ++
+            "250-localhost Hello client\r\n" ++
+            "250 CHUNKING\r\n" ++
+            "250 2.0.0 Chunk received\r\n",
+    );
+
+    var client = try Client.init(allocator, transport.transport(), .{});
+    defer client.deinit();
+
+    var ehlo_resp = try client.ehlo("client");
+    defer smtp.freeResponse(allocator, &ehlo_resp);
+    client.state = .rcpt;
+
+    var source = std.io.fixedBufferStream("Hello World");
+    var resp = try client.sendBdatReader(source.reader());
+    defer smtp.freeResponse(allocator, &resp);
+
+    try std.testing.expect(std.mem.indexOf(u8, transport.output.items, "BDAT 11 LAST\r\nHello World") != null);
 }
