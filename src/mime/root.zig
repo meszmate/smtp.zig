@@ -1,9 +1,15 @@
 pub const builder = @import("builder.zig");
+pub const parser = @import("parser.zig");
 pub const quoted_printable = @import("quoted_printable.zig");
 pub const base64 = @import("base64.zig");
 pub const headers = @import("headers.zig");
 
 pub const MessageBuilder = builder.MessageBuilder;
+pub const ParsedHeader = parser.Header;
+pub const ParsedPart = parser.Part;
+pub const ParsedMessage = parser.Message;
+pub const parseMessageAlloc = parser.parseMessageAlloc;
+pub const parsePartAlloc = parser.parsePartAlloc;
 pub const encodeQuotedPrintableAlloc = quoted_printable.encodeAlloc;
 pub const decodeQuotedPrintableAlloc = quoted_printable.decodeAlloc;
 pub const encodeBase64MimeAlloc = base64.encodeMimeAlloc;

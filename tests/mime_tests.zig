@@ -5,6 +5,7 @@ const qp = smtp.mime.quoted_printable;
 const base64 = smtp.mime.base64;
 const headers = smtp.mime.headers;
 const MessageBuilder = smtp.mime.MessageBuilder;
+const ParsedMessage = smtp.mime.ParsedMessage;
 
 // ---------------------------------------------------------------------------
 // Quoted-printable encoding
@@ -419,4 +420,108 @@ test "builder: addBlankLine produces CRLF" {
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("\r\n", result);
+}
+
+// ---------------------------------------------------------------------------
+// MIME parser
+// ---------------------------------------------------------------------------
+
+test "parser: parses a simple message" {
+    const allocator = std.testing.allocator;
+    var message: ParsedMessage = try smtp.mime.parseMessageAlloc(
+        allocator,
+        "From: sender@example.com\r\n" ++
+            "Subject: Test\r\n" ++
+            "\r\n" ++
+            "Hello, parser!\r\n",
+    );
+    defer message.deinit();
+
+    try std.testing.expectEqualStrings("sender@example.com", message.headerValue("From").?);
+    try std.testing.expectEqualStrings("Test", message.headerValue("Subject").?);
+    try std.testing.expectEqualStrings("text/plain", message.root.content_type);
+    try std.testing.expectEqualStrings("Hello, parser!\r\n", message.root.body);
+}
+
+test "parser: unfolds folded headers" {
+    const allocator = std.testing.allocator;
+    var message = try smtp.mime.parseMessageAlloc(
+        allocator,
+        "Subject: This is a long\r\n" ++
+            " folded header\r\n" ++
+            "\r\n" ++
+            "body",
+    );
+    defer message.deinit();
+
+    try std.testing.expectEqualStrings("This is a long folded header", message.headerValue("Subject").?);
+}
+
+test "parser: decodes quoted-printable bodies" {
+    const allocator = std.testing.allocator;
+    var message = try smtp.mime.parseMessageAlloc(
+        allocator,
+        "Content-Type: text/plain; charset=UTF-8\r\n" ++
+            "Content-Transfer-Encoding: quoted-printable\r\n" ++
+            "\r\n" ++
+            "Caf=C3=A9",
+    );
+    defer message.deinit();
+
+    try std.testing.expectEqualStrings("UTF-8", message.root.charset.?);
+    try std.testing.expectEqualStrings("Caf\xC3\xA9", message.root.body);
+}
+
+test "parser: decodes base64 bodies" {
+    const allocator = std.testing.allocator;
+    var message = try smtp.mime.parseMessageAlloc(
+        allocator,
+        "Content-Type: text/plain\r\n" ++
+            "Content-Transfer-Encoding: base64\r\n" ++
+            "\r\n" ++
+            "SGVsbG8sIFdvcmxkIQ==",
+    );
+    defer message.deinit();
+
+    try std.testing.expectEqualStrings("Hello, World!", message.root.body);
+}
+
+test "parser: parses multipart messages recursively" {
+    const allocator = std.testing.allocator;
+    var message = try smtp.mime.parseMessageAlloc(
+        allocator,
+        "Content-Type: multipart/mixed; boundary=\"abc123\"\r\n" ++
+            "\r\n" ++
+            "--abc123\r\n" ++
+            "Content-Type: text/plain\r\n" ++
+            "\r\n" ++
+            "plain text\r\n" ++
+            "--abc123\r\n" ++
+            "Content-Type: text/html\r\n" ++
+            "\r\n" ++
+            "<p>html</p>\r\n" ++
+            "--abc123--\r\n",
+    );
+    defer message.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), message.root.children.len);
+    try std.testing.expectEqualStrings("text/plain", message.root.children[0].content_type);
+    try std.testing.expectEqualStrings("plain text", std.mem.trimRight(u8, message.root.children[0].body, "\r\n"));
+    try std.testing.expectEqualStrings("text/html", message.root.children[1].content_type);
+    try std.testing.expectEqualStrings("<p>html</p>", std.mem.trimRight(u8, message.root.children[1].body, "\r\n"));
+}
+
+test "parser: extracts attachment metadata" {
+    const allocator = std.testing.allocator;
+    var message = try smtp.mime.parseMessageAlloc(
+        allocator,
+        "Content-Type: application/pdf; name=\"report.pdf\"\r\n" ++
+            "Content-Disposition: attachment; filename=\"report.pdf\"\r\n" ++
+            "\r\n" ++
+            "pdf-bytes",
+    );
+    defer message.deinit();
+
+    try std.testing.expectEqual(message.root.disposition.?, smtp.ContentDisposition.attachment);
+    try std.testing.expectEqualStrings("report.pdf", message.root.filename.?);
 }
