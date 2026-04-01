@@ -83,19 +83,28 @@ pub const Chain = struct {
 pub const LogSink = struct {
     log_fn: *const fn (msg: []const u8) void,
 
+    /// Module-level state for the active log function and next handler.
+    /// This is necessary because Zig function pointers cannot capture state.
+    var active_log_fn: ?*const fn (msg: []const u8) void = null;
+    var saved_next: ?Handler = null;
+
     pub fn middleware(self: *const LogSink) Middleware {
-        _ = self;
+        active_log_fn = self.log_fn;
         return logMiddleware;
     }
 
     fn logMiddleware(next: Handler) Handler {
-        _ = next;
+        saved_next = next;
         return logHandler;
     }
 
     fn logHandler(ctx: *Context) anyerror!void {
-        // Log the command (in a real implementation this would use the log_fn).
-        _ = ctx;
+        if (active_log_fn) |log| {
+            log(ctx.command);
+        }
+        if (saved_next) |next| {
+            try next(ctx);
+        }
     }
 };
 
@@ -106,18 +115,35 @@ pub const Metrics = struct {
     bytes_received: u64 = 0,
     bytes_sent: u64 = 0,
 
+    /// Module-level state for the active metrics instance and next handler.
+    var active: ?*Metrics = null;
+    var saved_next: ?Handler = null;
+
     pub fn middleware(self: *Metrics) Middleware {
-        _ = self;
+        active = self;
         return metricsMiddleware;
     }
 
     fn metricsMiddleware(next: Handler) Handler {
-        _ = next;
+        saved_next = next;
         return metricsHandler;
     }
 
     fn metricsHandler(ctx: *Context) anyerror!void {
-        _ = ctx;
+        const self = active orelse return;
+        self.commands_total += 1;
+        self.bytes_received += ctx.args.len + ctx.command.len;
+
+        if (saved_next) |next| {
+            next(ctx) catch |err| {
+                self.commands_failed += 1;
+                return err;
+            };
+        }
+
+        if (ctx.error_code != 0) {
+            self.commands_failed += 1;
+        }
     }
 
     pub fn reset(self: *Metrics) void {
@@ -135,6 +161,10 @@ pub const RateLimiter = struct {
     current_count: u64 = 0,
     window_start_ms: i64 = 0,
 
+    /// Module-level state for the active rate limiter and next handler.
+    var active: ?*RateLimiter = null;
+    var saved_next: ?Handler = null;
+
     pub fn init(max_commands: u64, window_ms: u64) RateLimiter {
         return .{
             .max_commands = max_commands,
@@ -143,17 +173,26 @@ pub const RateLimiter = struct {
     }
 
     pub fn middleware(self: *RateLimiter) Middleware {
-        _ = self;
+        active = self;
         return rateLimitMiddleware;
     }
 
     fn rateLimitMiddleware(next: Handler) Handler {
-        _ = next;
+        saved_next = next;
         return rateLimitHandler;
     }
 
     fn rateLimitHandler(ctx: *Context) anyerror!void {
-        _ = ctx;
+        const self = active orelse return;
+        if (!self.allow(ctx.timestamp_ms)) {
+            ctx.handled = true;
+            ctx.error_code = 421;
+            ctx.error_message = "4.7.0 Too many commands, slow down";
+            return;
+        }
+        if (saved_next) |next| {
+            try next(ctx);
+        }
     }
 
     /// Check if a command is allowed under the rate limit.
@@ -179,6 +218,10 @@ pub const RateLimiter = struct {
 pub const Timeout = struct {
     timeout_ms: u64,
 
+    /// Module-level state for the active timeout config and next handler.
+    var active: ?*const Timeout = null;
+    var saved_next: ?Handler = null;
+
     pub fn init(timeout_ms: u64) Timeout {
         return .{
             .timeout_ms = timeout_ms,
@@ -186,16 +229,28 @@ pub const Timeout = struct {
     }
 
     pub fn middleware(self: *const Timeout) Middleware {
-        _ = self;
+        active = self;
         return timeoutMiddleware;
     }
 
     fn timeoutMiddleware(next: Handler) Handler {
-        _ = next;
+        saved_next = next;
         return timeoutHandler;
     }
 
     fn timeoutHandler(ctx: *Context) anyerror!void {
-        _ = ctx;
+        const self = active orelse return;
+        if (ctx.timestamp_ms > 0) {
+            const now = std.time.milliTimestamp();
+            if (now - ctx.timestamp_ms > @as(i64, @intCast(self.timeout_ms))) {
+                ctx.handled = true;
+                ctx.error_code = 421;
+                ctx.error_message = "4.4.2 Command timeout exceeded";
+                return;
+            }
+        }
+        if (saved_next) |next| {
+            try next(ctx);
+        }
     }
 };

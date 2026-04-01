@@ -1,4 +1,6 @@
 const std = @import("std");
+const dkim_key = @import("dkim/key.zig");
+const dkim_canon = @import("dkim/canonicalize.zig");
 
 /// ARC chain validation result per RFC 8617 Section 5.2.
 pub const ArcResult = enum {
@@ -55,17 +57,67 @@ pub const ArcSet = struct {
     auth_results: ArcAuthResults,
 };
 
-/// Options for signing a new ARC set.
+/// Options for signing a new ARC set (deprecated, use ArcSigner instead).
 pub const ArcSignOptions = struct {
     instance: u32,
     domain: []const u8,
     selector: []const u8,
-    private_key: []const u8,
+    key: dkim_key.SigningKey,
     authserv_id: []const u8,
     auth_results_text: []const u8,
     chain_validation: ArcResult,
     signed_headers: []const u8 = "From:To:Subject:Date",
     timestamp: ?u64 = null,
+};
+
+/// ArcSigner provides a clean API for signing ARC sets with Ed25519.
+pub const ArcSigner = struct {
+    allocator: std.mem.Allocator,
+    key: dkim_key.SigningKey,
+    domain: []const u8,
+    selector: []const u8,
+
+    pub const SignOptions = struct {
+        instance: u32,
+        authserv_id: []const u8,
+        auth_results_text: []const u8,
+        chain_validation: ArcResult,
+        signed_headers: []const u8 = "From:To:Subject:Date",
+        timestamp: ?u64 = null,
+    };
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        key: dkim_key.SigningKey,
+        domain: []const u8,
+        selector: []const u8,
+    ) ArcSigner {
+        return .{
+            .allocator = allocator,
+            .key = key,
+            .domain = domain,
+            .selector = selector,
+        };
+    }
+
+    /// Sign a message, adding a new ARC set.
+    /// Returns the three ARC headers (AAR, AMS, AS) to prepend.
+    /// Caller owns the returned memory.
+    pub fn signAlloc(self: *ArcSigner, message: []const u8, options: SignOptions) ![]u8 {
+        return signArcSetEd25519(
+            self.allocator,
+            message,
+            &self.key,
+            self.domain,
+            self.selector,
+            options.instance,
+            options.authserv_id,
+            options.auth_results_text,
+            options.chain_validation,
+            options.signed_headers,
+            options.timestamp,
+        );
+    }
 };
 
 /// Build an ARC-Seal header string per RFC 8617 Section 4.1.3.
@@ -259,70 +311,240 @@ fn computeBodyHashAlloc(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
     return encoded;
 }
 
-/// Sign a message with ARC headers, producing all three ARC headers for a new instance.
-/// Returns the three ARC headers concatenated, ready to be prepended to the message.
-/// Caller owns the returned memory.
-///
-/// Note: This produces a placeholder signature using HMAC-SHA256 with the provided
-/// private_key bytes. For production use with Ed25519 or RSA, integrate with a
-/// proper cryptographic signing module.
-pub fn signArcSetAlloc(allocator: std.mem.Allocator, message: []const u8, options: ArcSignOptions) ![]u8 {
-    // Separate headers from body
-    const header_end = std.mem.indexOf(u8, message, "\r\n\r\n") orelse message.len;
-    const body = if (header_end + 4 <= message.len) message[header_end + 4 ..] else "";
+/// Split a message into headers and body at the blank line.
+fn splitMessage(message: []const u8) struct { headers: []const u8, body: []const u8 } {
+    if (std.mem.indexOf(u8, message, "\r\n\r\n")) |sep| {
+        return .{
+            .headers = message[0 .. sep + 2], // Include trailing CRLF of last header
+            .body = message[sep + 4 ..],
+        };
+    }
+    // No blank line found - entire message is headers
+    return .{ .headers = message, .body = "" };
+}
 
-    // Compute body hash
-    const body_hash = try computeBodyHashAlloc(allocator, body);
-    defer allocator.free(body_hash);
+/// Find a header by name in the headers section (case-insensitive).
+/// Returns the full header line including continuation lines.
+fn findHeader(headers: []const u8, name: []const u8) ?[]const u8 {
+    var last_match: ?[]const u8 = null;
+    var pos: usize = 0;
 
-    // Compute message signature using HMAC-SHA256
-    const msg_sig = try computeHmacSignatureAlloc(allocator, options.private_key, message);
-    defer allocator.free(msg_sig);
+    while (pos < headers.len) {
+        var end = pos;
+        while (end < headers.len) {
+            if (end + 1 < headers.len and headers[end] == '\r' and headers[end + 1] == '\n') {
+                end += 2;
+                if (end < headers.len and (headers[end] == ' ' or headers[end] == '\t')) {
+                    continue;
+                }
+                break;
+            }
+            end += 1;
+        }
+        if (end == pos) break;
 
-    // Build ARC-Authentication-Results
+        const line = headers[pos..end];
+
+        const colon = std.mem.indexOfScalar(u8, line, ':');
+        if (colon) |c| {
+            const hdr_name = std.mem.trim(u8, line[0..c], " \t");
+            if (hdr_name.len == name.len and std.ascii.eqlIgnoreCase(hdr_name, name)) {
+                last_match = line;
+            }
+        }
+
+        pos = end;
+    }
+
+    return last_match;
+}
+
+/// Core Ed25519 ARC signing implementation used by both signArcSetAlloc and ArcSigner.
+fn signArcSetEd25519(
+    allocator: std.mem.Allocator,
+    message: []const u8,
+    key: *const dkim_key.SigningKey,
+    domain: []const u8,
+    selector: []const u8,
+    instance: u32,
+    authserv_id: []const u8,
+    auth_results_text: []const u8,
+    chain_validation: ArcResult,
+    signed_headers: []const u8,
+    timestamp: ?u64,
+) ![]u8 {
+    // Split message into headers and body
+    const header_body = splitMessage(message);
+    const headers_part = header_body.headers;
+    const body_part = header_body.body;
+
+    // Step 1: Canonicalize body (relaxed) and compute SHA-256 body hash
+    const canon_body = try dkim_canon.canonicalizeBody(allocator, body_part, .relaxed);
+    defer allocator.free(canon_body);
+
+    var body_hash_raw: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(canon_body, &body_hash_raw, .{});
+    var body_hash_b64: [44]u8 = undefined;
+    const body_hash = std.base64.standard.Encoder.encode(&body_hash_b64, &body_hash_raw);
+
+    // Step 2: Build ARC-Authentication-Results
     const aar = ArcAuthResults{
-        .instance = options.instance,
-        .authserv_id = options.authserv_id,
-        .results = options.auth_results_text,
+        .instance = instance,
+        .authserv_id = authserv_id,
+        .results = auth_results_text,
     };
     const aar_header = try buildArcAuthResultsAlloc(allocator, aar);
     defer allocator.free(aar_header);
 
-    // Build ARC-Message-Signature
-    const ams = ArcMessageSignature{
-        .instance = options.instance,
+    // Step 3: Build ARC-Message-Signature with empty b= for signing
+    const ams_empty = ArcMessageSignature{
+        .instance = instance,
         .algorithm = "ed25519-sha256",
-        .domain = options.domain,
-        .selector = options.selector,
-        .signed_headers = options.signed_headers,
+        .domain = domain,
+        .selector = selector,
+        .signed_headers = signed_headers,
         .body_hash = body_hash,
-        .signature = msg_sig,
-        .timestamp = options.timestamp,
+        .signature = "",
+        .timestamp = timestamp,
     };
-    const ams_header = try buildArcMessageSignatureAlloc(allocator, ams);
+    const ams_header_empty = try buildArcMessageSignatureAlloc(allocator, ams_empty);
+    defer allocator.free(ams_header_empty);
+
+    // Step 4: Build AMS signing input - canonicalize selected headers + AMS header
+    var ams_signing_input: std.ArrayList(u8) = .empty;
+    defer ams_signing_input.deinit(allocator);
+
+    // Collect and canonicalize selected headers from the message
+    var header_names = std.mem.splitScalar(u8, signed_headers, ':');
+    while (header_names.next()) |name| {
+        const trimmed_name = std.mem.trim(u8, name, " \t");
+        if (trimmed_name.len == 0) continue;
+
+        if (findHeader(headers_part, trimmed_name)) |found_header| {
+            const canon_hdr = try dkim_canon.canonicalizeHeader(allocator, found_header, .relaxed);
+            defer allocator.free(canon_hdr);
+            try ams_signing_input.appendSlice(allocator, canon_hdr);
+        }
+    }
+
+    // Append canonicalized AMS header (without trailing CRLF) for signing
+    const canon_ams = try dkim_canon.canonicalizeHeader(allocator, ams_header_empty, .relaxed);
+    defer allocator.free(canon_ams);
+    const ams_no_crlf = if (std.mem.endsWith(u8, canon_ams, "\r\n"))
+        canon_ams[0 .. canon_ams.len - 2]
+    else
+        canon_ams;
+    try ams_signing_input.appendSlice(allocator, ams_no_crlf);
+
+    // Step 5: Sign AMS with Ed25519
+    const ams_sig_bytes = key.sign(ams_signing_input.items);
+    const ams_sig_b64_len = std.base64.standard.Encoder.calcSize(ams_sig_bytes.len);
+    const ams_sig_b64 = try allocator.alloc(u8, ams_sig_b64_len);
+    defer allocator.free(ams_sig_b64);
+    _ = std.base64.standard.Encoder.encode(ams_sig_b64, &ams_sig_bytes);
+
+    // Step 6: Build final AMS with signature
+    const ams_final = ArcMessageSignature{
+        .instance = instance,
+        .algorithm = "ed25519-sha256",
+        .domain = domain,
+        .selector = selector,
+        .signed_headers = signed_headers,
+        .body_hash = body_hash,
+        .signature = ams_sig_b64,
+        .timestamp = timestamp,
+    };
+    const ams_header = try buildArcMessageSignatureAlloc(allocator, ams_final);
     defer allocator.free(ams_header);
 
-    // Build seal input: AAR + AMS headers, then sign
-    var seal_input: std.ArrayList(u8) = .empty;
-    defer seal_input.deinit(allocator);
-    try seal_input.appendSlice(allocator, aar_header);
-    try seal_input.appendSlice(allocator, "\r\n");
-    try seal_input.appendSlice(allocator, ams_header);
-
-    const seal_sig = try computeHmacSignatureAlloc(allocator, options.private_key, seal_input.items);
-    defer allocator.free(seal_sig);
-
-    // Build ARC-Seal
-    const as = ArcSeal{
-        .instance = options.instance,
+    // Step 7: Build ARC-Seal with empty b= for signing
+    const as_empty = ArcSeal{
+        .instance = instance,
         .algorithm = "ed25519-sha256",
-        .domain = options.domain,
-        .selector = options.selector,
-        .chain_validation = options.chain_validation,
-        .signature = seal_sig,
-        .timestamp = options.timestamp,
+        .domain = domain,
+        .selector = selector,
+        .chain_validation = chain_validation,
+        .signature = "",
+        .timestamp = timestamp,
     };
-    const as_header = try buildArcSealAlloc(allocator, as);
+    const as_header_empty = try buildArcSealAlloc(allocator, as_empty);
+    defer allocator.free(as_header_empty);
+
+    // Step 8: Build seal signing input per RFC 8617:
+    // Previous ARC-Seal headers (i=1..n-1) + current AAR + current AMS + current AS(empty b=)
+    var seal_signing_input: std.ArrayList(u8) = .empty;
+    defer seal_signing_input.deinit(allocator);
+
+    // For instance > 1, previous ARC-Seal headers would be extracted from the message.
+    // Extract previous ARC-Seal headers from the message if instance > 1.
+    if (instance > 1) {
+        var pos: usize = 0;
+        while (pos < headers_part.len) {
+            var end = pos;
+            while (end < headers_part.len) {
+                if (end + 1 < headers_part.len and headers_part[end] == '\r' and headers_part[end + 1] == '\n') {
+                    end += 2;
+                    if (end < headers_part.len and (headers_part[end] == ' ' or headers_part[end] == '\t')) {
+                        continue;
+                    }
+                    break;
+                }
+                end += 1;
+            }
+            if (end == pos) break;
+
+            const line = headers_part[pos..end];
+            // Check if this is an ARC-Seal header
+            const colon = std.mem.indexOfScalar(u8, line, ':');
+            if (colon) |c| {
+                const hdr_name = std.mem.trim(u8, line[0..c], " \t");
+                if (std.ascii.eqlIgnoreCase(hdr_name, "ARC-Seal")) {
+                    const canon_prev = try dkim_canon.canonicalizeHeader(allocator, line, .relaxed);
+                    defer allocator.free(canon_prev);
+                    try seal_signing_input.appendSlice(allocator, canon_prev);
+                }
+            }
+            pos = end;
+        }
+    }
+
+    // Add current AAR (canonicalized)
+    const canon_aar = try dkim_canon.canonicalizeHeader(allocator, aar_header, .relaxed);
+    defer allocator.free(canon_aar);
+    try seal_signing_input.appendSlice(allocator, canon_aar);
+
+    // Add current AMS (canonicalized)
+    const canon_ams_final = try dkim_canon.canonicalizeHeader(allocator, ams_header, .relaxed);
+    defer allocator.free(canon_ams_final);
+    try seal_signing_input.appendSlice(allocator, canon_ams_final);
+
+    // Add current AS with empty b= (canonicalized, without trailing CRLF)
+    const canon_as = try dkim_canon.canonicalizeHeader(allocator, as_header_empty, .relaxed);
+    defer allocator.free(canon_as);
+    const as_no_crlf = if (std.mem.endsWith(u8, canon_as, "\r\n"))
+        canon_as[0 .. canon_as.len - 2]
+    else
+        canon_as;
+    try seal_signing_input.appendSlice(allocator, as_no_crlf);
+
+    // Step 9: Sign the seal with Ed25519
+    const seal_sig_bytes = key.sign(seal_signing_input.items);
+    const seal_sig_b64_len = std.base64.standard.Encoder.calcSize(seal_sig_bytes.len);
+    const seal_sig_b64 = try allocator.alloc(u8, seal_sig_b64_len);
+    defer allocator.free(seal_sig_b64);
+    _ = std.base64.standard.Encoder.encode(seal_sig_b64, &seal_sig_bytes);
+
+    // Step 10: Build final ARC-Seal with signature
+    const as_final = ArcSeal{
+        .instance = instance,
+        .algorithm = "ed25519-sha256",
+        .domain = domain,
+        .selector = selector,
+        .chain_validation = chain_validation,
+        .signature = seal_sig_b64,
+        .timestamp = timestamp,
+    };
+    const as_header = try buildArcSealAlloc(allocator, as_final);
     defer allocator.free(as_header);
 
     // Concatenate all three headers per RFC 8617 ordering: AAR, AMS, AS
@@ -338,42 +560,23 @@ pub fn signArcSetAlloc(allocator: std.mem.Allocator, message: []const u8, option
     return result.toOwnedSlice(allocator);
 }
 
-/// Compute HMAC-SHA256 and return base64-encoded result.
-fn computeHmacSignatureAlloc(allocator: std.mem.Allocator, key: []const u8, data: []const u8) ![]u8 {
-    // Pad or hash the key to block size (64 bytes for SHA-256)
-    var key_block: [64]u8 = @splat(0);
-    if (key.len > 64) {
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(key);
-        const key_hash = hasher.finalResult();
-        @memcpy(key_block[0..key_hash.len], &key_hash);
-    } else {
-        @memcpy(key_block[0..key.len], key);
-    }
-
-    // Inner hash: H((key XOR ipad) || data)
-    var ipad: [64]u8 = undefined;
-    var opad: [64]u8 = undefined;
-    for (0..64) |i| {
-        ipad[i] = key_block[i] ^ 0x36;
-        opad[i] = key_block[i] ^ 0x5c;
-    }
-
-    var inner = std.crypto.hash.sha2.Sha256.init(.{});
-    inner.update(&ipad);
-    inner.update(data);
-    const inner_hash = inner.finalResult();
-
-    // Outer hash: H((key XOR opad) || inner_hash)
-    var outer = std.crypto.hash.sha2.Sha256.init(.{});
-    outer.update(&opad);
-    outer.update(&inner_hash);
-    const mac = outer.finalResult();
-
-    const encoded_len = std.base64.standard.Encoder.calcSize(mac.len);
-    const encoded = try allocator.alloc(u8, encoded_len);
-    _ = std.base64.standard.Encoder.encode(encoded, &mac);
-    return encoded;
+/// Sign a message with ARC headers using Ed25519, producing all three ARC headers for a new instance.
+/// Returns the three ARC headers concatenated, ready to be prepended to the message.
+/// Caller owns the returned memory.
+pub fn signArcSetAlloc(allocator: std.mem.Allocator, message: []const u8, options: ArcSignOptions) ![]u8 {
+    return signArcSetEd25519(
+        allocator,
+        message,
+        &options.key,
+        options.domain,
+        options.selector,
+        options.instance,
+        options.authserv_id,
+        options.auth_results_text,
+        options.chain_validation,
+        options.signed_headers,
+        options.timestamp,
+    );
 }
 
 fn parseChainValidation(val: []const u8) ArcResult {
@@ -519,8 +722,13 @@ test "parseArcMessageSignature handles single canonicalization" {
     try std.testing.expectEqualStrings("relaxed", sig.canonicalization_body);
 }
 
-test "signArcSetAlloc produces valid output" {
+test "signArcSetAlloc produces valid Ed25519-signed output" {
     const allocator = std.testing.allocator;
+
+    // Generate a deterministic Ed25519 key
+    var seed: [32]u8 = undefined;
+    @memset(&seed, 0x42);
+    const k = dkim_key.loadEd25519KeyFromSeed(seed);
 
     const message = "From: sender@example.com\r\nTo: rcpt@example.com\r\nSubject: Test\r\nDate: Thu, 01 Jan 2026 00:00:00 +0000\r\n\r\nHello, World!";
 
@@ -528,7 +736,7 @@ test "signArcSetAlloc produces valid output" {
         .instance = 1,
         .domain = "relay.example.com",
         .selector = "arc1",
-        .private_key = "test-key-material-for-hmac",
+        .key = .{ .ed25519 = k },
         .authserv_id = "relay.example.com",
         .auth_results_text = "dkim=pass header.d=example.com; spf=pass smtp.mailfrom=example.com",
         .chain_validation = .arc_none,
@@ -550,10 +758,21 @@ test "signArcSetAlloc produces valid output" {
 
     // Should contain auth results text
     try std.testing.expect(std.mem.indexOf(u8, result, "dkim=pass") != null);
+
+    // Signatures should be base64 Ed25519 (88 chars for 64-byte signature)
+    // Verify AMS signature is present and non-empty
+    const ams_b_pos = std.mem.indexOf(u8, result, "ARC-Message-Signature:").?;
+    const ams_line_end = std.mem.indexOfPos(u8, result, ams_b_pos, "\r\n") orelse result.len;
+    const ams_line = result[ams_b_pos..ams_line_end];
+    try std.testing.expect(std.mem.indexOf(u8, ams_line, "; b=") != null);
 }
 
 test "signArcSetAlloc with instance 2" {
     const allocator = std.testing.allocator;
+
+    var seed: [32]u8 = undefined;
+    @memset(&seed, 0x55);
+    const k = dkim_key.loadEd25519KeyFromSeed(seed);
 
     const message = "From: a@b.com\r\nTo: c@d.com\r\n\r\nBody";
 
@@ -561,7 +780,7 @@ test "signArcSetAlloc with instance 2" {
         .instance = 2,
         .domain = "hop2.example.com",
         .selector = "s2",
-        .private_key = "another-key",
+        .key = .{ .ed25519 = k },
         .authserv_id = "hop2.example.com",
         .auth_results_text = "arc=pass",
         .chain_validation = .arc_pass,
@@ -571,6 +790,139 @@ test "signArcSetAlloc with instance 2" {
 
     try std.testing.expect(std.mem.indexOf(u8, result, "i=2") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "cv=pass") != null);
+}
+
+test "signArcSetAlloc deterministic with same key and timestamp" {
+    const allocator = std.testing.allocator;
+
+    var seed: [32]u8 = undefined;
+    @memset(&seed, 0x42);
+    const k = dkim_key.loadEd25519KeyFromSeed(seed);
+
+    const message = "From: a@test.com\r\nTo: b@test.com\r\n\r\nBody\r\n";
+
+    const result1 = try signArcSetAlloc(allocator, message, .{
+        .instance = 1,
+        .domain = "test.com",
+        .selector = "s1",
+        .key = .{ .ed25519 = k },
+        .authserv_id = "test.com",
+        .auth_results_text = "none",
+        .chain_validation = .arc_none,
+        .signed_headers = "From:To",
+        .timestamp = 1000000,
+    });
+    defer allocator.free(result1);
+
+    const result2 = try signArcSetAlloc(allocator, message, .{
+        .instance = 1,
+        .domain = "test.com",
+        .selector = "s1",
+        .key = .{ .ed25519 = k },
+        .authserv_id = "test.com",
+        .auth_results_text = "none",
+        .chain_validation = .arc_none,
+        .signed_headers = "From:To",
+        .timestamp = 1000000,
+    });
+    defer allocator.free(result2);
+
+    // Same key + same timestamp = same output (deterministic)
+    try std.testing.expectEqualStrings(result1, result2);
+}
+
+test "signArcSetAlloc produces valid base64 Ed25519 signatures" {
+    const allocator = std.testing.allocator;
+
+    var seed: [32]u8 = undefined;
+    @memset(&seed, 0xAB);
+    const k = dkim_key.loadEd25519KeyFromSeed(seed);
+
+    const message = "From: sender@example.com\r\nTo: rcpt@example.com\r\nSubject: Test\r\n\r\nBody text\r\n";
+
+    const result = try signArcSetAlloc(allocator, message, .{
+        .instance = 1,
+        .domain = "example.com",
+        .selector = "s1",
+        .key = .{ .ed25519 = k },
+        .authserv_id = "example.com",
+        .auth_results_text = "spf=pass",
+        .chain_validation = .arc_none,
+        .signed_headers = "From:To:Subject",
+        .timestamp = 1700000000,
+    });
+    defer allocator.free(result);
+
+    // Extract the AMS signature from the result
+    const ams_start = std.mem.indexOf(u8, result, "ARC-Message-Signature:").?;
+    const ams_end = std.mem.indexOfPos(u8, result, ams_start, "\r\n").?;
+    const ams_line = result[ams_start..ams_end];
+
+    // Find the b= value in the AMS line (last "; b=" occurrence, after "; bh=")
+    const b_tag = std.mem.lastIndexOf(u8, ams_line, "; b=").?;
+    const sig_start = b_tag + 4;
+    const sig_b64 = ams_line[sig_start..];
+
+    // Ed25519 signature is 64 bytes, base64-encoded = 88 chars
+    try std.testing.expectEqual(@as(usize, 88), sig_b64.len);
+
+    // Verify the signature decodes as valid base64
+    var sig_bytes: [64]u8 = undefined;
+    std.base64.standard.Decoder.decode(&sig_bytes, sig_b64) catch {
+        return error.TestUnexpectedResult;
+    };
+
+    // Similarly check ARC-Seal signature
+    const as_start = std.mem.indexOf(u8, result, "ARC-Seal:").?;
+    const as_end = std.mem.indexOfPos(u8, result, as_start, "\r\n").?;
+    const as_line = result[as_start..as_end];
+    const as_b_tag = std.mem.lastIndexOf(u8, as_line, "; b=").?;
+    const as_sig_b64 = as_line[as_b_tag + 4 ..];
+    try std.testing.expectEqual(@as(usize, 88), as_sig_b64.len);
+
+    var as_sig_bytes: [64]u8 = undefined;
+    std.base64.standard.Decoder.decode(&as_sig_bytes, as_sig_b64) catch {
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "ArcSigner produces same output as signArcSetAlloc" {
+    const allocator = std.testing.allocator;
+
+    var seed: [32]u8 = undefined;
+    @memset(&seed, 0x42);
+    const k = dkim_key.loadEd25519KeyFromSeed(seed);
+
+    const message = "From: sender@example.com\r\nTo: rcpt@example.com\r\n\r\nHello\r\n";
+
+    // Use ArcSigner
+    var signer = ArcSigner.init(allocator, .{ .ed25519 = k }, "example.com", "s1");
+    const signer_result = try signer.signAlloc(message, .{
+        .instance = 1,
+        .authserv_id = "example.com",
+        .auth_results_text = "none",
+        .chain_validation = .arc_none,
+        .signed_headers = "From:To",
+        .timestamp = 1000000,
+    });
+    defer allocator.free(signer_result);
+
+    // Use signArcSetAlloc
+    const direct_result = try signArcSetAlloc(allocator, message, .{
+        .instance = 1,
+        .domain = "example.com",
+        .selector = "s1",
+        .key = .{ .ed25519 = k },
+        .authserv_id = "example.com",
+        .auth_results_text = "none",
+        .chain_validation = .arc_none,
+        .signed_headers = "From:To",
+        .timestamp = 1000000,
+    });
+    defer allocator.free(direct_result);
+
+    // Both should produce identical output
+    try std.testing.expectEqualStrings(signer_result, direct_result);
 }
 
 test "computeBodyHashAlloc produces consistent hash" {
@@ -589,24 +941,6 @@ test "computeBodyHashAlloc different bodies produce different hashes" {
     const hash2 = try computeBodyHashAlloc(allocator, "World");
     defer allocator.free(hash2);
     try std.testing.expect(!std.mem.eql(u8, hash1, hash2));
-}
-
-test "computeHmacSignatureAlloc produces consistent signature" {
-    const allocator = std.testing.allocator;
-    const sig1 = try computeHmacSignatureAlloc(allocator, "key", "data");
-    defer allocator.free(sig1);
-    const sig2 = try computeHmacSignatureAlloc(allocator, "key", "data");
-    defer allocator.free(sig2);
-    try std.testing.expectEqualStrings(sig1, sig2);
-}
-
-test "computeHmacSignatureAlloc different keys produce different signatures" {
-    const allocator = std.testing.allocator;
-    const sig1 = try computeHmacSignatureAlloc(allocator, "key1", "data");
-    defer allocator.free(sig1);
-    const sig2 = try computeHmacSignatureAlloc(allocator, "key2", "data");
-    defer allocator.free(sig2);
-    try std.testing.expect(!std.mem.eql(u8, sig1, sig2));
 }
 
 test "parseChainValidation" {

@@ -52,6 +52,9 @@ pub const Options = struct {
     /// Additional capabilities to advertise. If null, defaultCapabilities() is used.
     capabilities: ?[]const []const u8 = null,
 
+    /// Grace period in milliseconds for graceful shutdown connection draining.
+    shutdown_grace_period_ms: u64 = 30_000,
+
     /// Optional policy engine invoked during SMTP command processing.
     policy_engine: ?*PolicyEngine = null,
     /// Optional streaming delivery hook for DATA/BDAT bodies.
