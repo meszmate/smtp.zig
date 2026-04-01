@@ -5,10 +5,12 @@ const key_mod = @import("key.zig");
 
 pub const Algorithm = enum {
     ed25519_sha256,
+    rsa_sha256,
 
     pub fn label(self: Algorithm) []const u8 {
         return switch (self) {
             .ed25519_sha256 => "ed25519-sha256",
+            .rsa_sha256 => "rsa-sha256",
         };
     }
 };
@@ -112,13 +114,14 @@ pub const Signer = struct {
         try signing_input.appendSlice(self.allocator, dkim_no_crlf);
 
         // Step 6: Sign
-        const sig_bytes = self.options.key.sign(signing_input.items);
+        const sig_result = self.options.key.sign(signing_input.items) orelse return error.SigningFailed;
+        const sig_slice = sig_result.slice();
 
         // Base64 encode signature
-        const sig_b64_len = std.base64.standard.Encoder.calcSize(sig_bytes.len);
+        const sig_b64_len = std.base64.standard.Encoder.calcSize(sig_slice.len);
         const sig_b64 = try self.allocator.alloc(u8, sig_b64_len);
         defer self.allocator.free(sig_b64);
-        _ = std.base64.standard.Encoder.encode(sig_b64, &sig_bytes);
+        _ = std.base64.standard.Encoder.encode(sig_b64, sig_slice);
 
         // Step 7: Build final DKIM-Signature header with signature
         const final_dkim_hdr_data = header_mod.DkimHeader{

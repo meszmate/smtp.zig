@@ -19,10 +19,13 @@ pub const buildDkimHeaderAlloc = header.buildDkimHeaderAlloc;
 pub const parseDkimHeader = header.parseDkimHeader;
 
 pub const Ed25519Key = key.Ed25519Key;
+pub const RsaKey = key.RsaKey;
 pub const SigningKey = key.SigningKey;
+pub const SignatureBytes = key.SignatureBytes;
 pub const loadEd25519KeyFromPem = key.loadEd25519KeyFromPem;
 pub const loadEd25519KeyFromSeed = key.loadEd25519KeyFromSeed;
 pub const generateEd25519Key = key.generateEd25519Key;
+pub const isRsaPkcs8Pem = key.isRsaPkcs8Pem;
 
 pub const DnsRecord = dns.DnsRecord;
 pub const buildDnsRecordAlloc = dns.buildDnsRecordAlloc;
