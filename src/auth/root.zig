@@ -9,3 +9,6 @@ pub const Login = login;
 pub const CramMd5 = crammd5;
 pub const XOAuth2 = xoauth2;
 pub const OAuthBearer = oauthbearer;
+
+pub const scram = @import("scram.zig");
+pub const Scram = scram;
