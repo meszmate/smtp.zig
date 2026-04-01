@@ -15,6 +15,7 @@ pub const address = @import("address.zig");
 pub const dns = @import("dns.zig");
 pub const queue = @import("queue/root.zig");
 pub const spf = @import("spf.zig");
+pub const log = @import("log.zig");
 pub const dmarc = @import("dmarc.zig");
 pub const arc = @import("arc.zig");
 pub const dkim = @import("dkim/root.zig");
