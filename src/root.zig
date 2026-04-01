@@ -18,6 +18,7 @@ pub const spf = @import("spf.zig");
 pub const dmarc = @import("dmarc.zig");
 pub const arc = @import("arc.zig");
 pub const dkim = @import("dkim/root.zig");
+pub const dane = @import("dane.zig");
 
 pub const ConnState = types.ConnState;
 pub const DsnNotify = types.DsnNotify;
