@@ -20,6 +20,7 @@ pub const dsn = @import("dsn.zig");
 pub const mta_sts = @import("mta_sts.zig");
 pub const arc = @import("arc.zig");
 pub const dkim = @import("dkim/root.zig");
+pub const dane = @import("dane.zig");
 
 pub const ConnState = types.ConnState;
 pub const DsnNotify = types.DsnNotify;
