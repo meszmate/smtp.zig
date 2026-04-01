@@ -31,6 +31,8 @@ const codes = response_mod.codes;
 const PolicyStage = policy_mod.Stage;
 const PolicyContext = policy_mod.Context;
 const PolicyRejection = policy_mod.Rejection;
+const tracker_mod = @import("tracker.zig");
+const ConnectionTracker = tracker_mod.ConnectionTracker;
 
 /// SMTP server that handles incoming connections.
 pub const Server = struct {
@@ -38,6 +40,7 @@ pub const Server = struct {
     store: *MemStore,
     options: Options,
     is_shutdown: bool = false,
+    connection_tracker: ConnectionTracker,
 
     /// Initialize a server with default options.
     pub fn init(allocator: std.mem.Allocator, store: *MemStore) Server {
@@ -45,6 +48,7 @@ pub const Server = struct {
             .allocator = allocator,
             .store = store,
             .options = .{},
+            .connection_tracker = ConnectionTracker.init(30_000),
         };
     }
 
@@ -54,17 +58,27 @@ pub const Server = struct {
             .allocator = allocator,
             .store = store,
             .options = opts,
+            .connection_tracker = ConnectionTracker.init(opts.shutdown_grace_period_ms),
         };
     }
 
-    /// Mark the server as shut down.
-    pub fn shutdown(self: *Server) void {
+    /// Initiate graceful shutdown: signal all connections and wait for drain.
+    /// Returns true if all connections drained within the grace period,
+    /// false if the timeout was reached with connections still active.
+    pub fn shutdown(self: *Server) bool {
         self.is_shutdown = true;
+        self.connection_tracker.requestShutdown();
+        return self.connection_tracker.waitForDrain();
     }
 
     /// Check if the server is shut down.
     pub fn isShutdown(self: *const Server) bool {
         return self.is_shutdown;
+    }
+
+    /// Return the number of currently active connections.
+    pub fn activeConnections(self: *const Server) u32 {
+        return self.connection_tracker.count();
     }
 
     fn hasTlsUpgrade(self: *const Server) bool {
@@ -119,6 +133,9 @@ pub const Server = struct {
         client_id: []const u8,
         tls_session: ?*TlsSession,
     ) void {
+        self.connection_tracker.add();
+        defer self.connection_tracker.remove();
+
         var connection = Conn.init(self.allocator, transport);
         defer connection.deinit();
         defer if (connection.tls_session) |session| session.deinit();
@@ -136,7 +153,7 @@ pub const Server = struct {
         connection.writeGreeting(self.options.hostname, self.options.greeting_text) catch return;
 
         // Main command loop.
-        while (!self.is_shutdown and connection.session.state != .logout) {
+        while (!self.is_shutdown and !self.connection_tracker.isShutdownRequested() and connection.session.state != .logout) {
             const result = connection.readCommandAlloc() catch |err| {
                 switch (err) {
                     error.EndOfStream => return,
