@@ -25,6 +25,7 @@ pub const ResponseWriter = writers.ResponseWriter;
 pub const StatusWriter = writers.StatusWriter;
 pub const SessionTracker = tracker.SessionTracker;
 pub const ServerTracker = tracker.ServerTracker;
+pub const ConnectionTracker = tracker.ConnectionTracker;
 pub const TlsProvider = tls.TlsProvider;
 pub const TlsSession = tls.TlsSession;
 pub const ConnectionMode = tls.ConnectionMode;
