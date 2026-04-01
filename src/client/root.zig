@@ -5,4 +5,6 @@ pub const options = @import("options.zig");
 pub const Client = client.Client;
 pub const Pool = pool.Pool;
 pub const PoolOptions = pool.PoolOptions;
+pub const PooledConnection = pool.PooledConnection;
+pub const PoolStats = pool.PoolStats;
 pub const Options = options.Options;
