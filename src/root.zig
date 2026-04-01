@@ -16,6 +16,7 @@ pub const dns = @import("dns.zig");
 pub const queue = @import("queue/root.zig");
 pub const spf = @import("spf.zig");
 pub const dmarc = @import("dmarc.zig");
+pub const mta_sts = @import("mta_sts.zig");
 pub const arc = @import("arc.zig");
 pub const dkim = @import("dkim/root.zig");
 
