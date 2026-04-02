@@ -437,11 +437,12 @@ fn signArcSetEd25519(
     try ams_signing_input.appendSlice(allocator, ams_no_crlf);
 
     // Step 5: Sign AMS with Ed25519
-    const ams_sig_bytes = key.sign(ams_signing_input.items);
-    const ams_sig_b64_len = std.base64.standard.Encoder.calcSize(ams_sig_bytes.len);
+    const ams_sig = key.sign(ams_signing_input.items) orelse return error.SigningFailed;
+    const ams_sig_slice = ams_sig.slice();
+    const ams_sig_b64_len = std.base64.standard.Encoder.calcSize(ams_sig_slice.len);
     const ams_sig_b64 = try allocator.alloc(u8, ams_sig_b64_len);
     defer allocator.free(ams_sig_b64);
-    _ = std.base64.standard.Encoder.encode(ams_sig_b64, &ams_sig_bytes);
+    _ = std.base64.standard.Encoder.encode(ams_sig_b64, ams_sig_slice);
 
     // Step 6: Build final AMS with signature
     const ams_final = ArcMessageSignature{
@@ -528,11 +529,12 @@ fn signArcSetEd25519(
     try seal_signing_input.appendSlice(allocator, as_no_crlf);
 
     // Step 9: Sign the seal with Ed25519
-    const seal_sig_bytes = key.sign(seal_signing_input.items);
-    const seal_sig_b64_len = std.base64.standard.Encoder.calcSize(seal_sig_bytes.len);
+    const seal_sig = key.sign(seal_signing_input.items) orelse return error.SigningFailed;
+    const seal_sig_slice = seal_sig.slice();
+    const seal_sig_b64_len = std.base64.standard.Encoder.calcSize(seal_sig_slice.len);
     const seal_sig_b64 = try allocator.alloc(u8, seal_sig_b64_len);
     defer allocator.free(seal_sig_b64);
-    _ = std.base64.standard.Encoder.encode(seal_sig_b64, &seal_sig_bytes);
+    _ = std.base64.standard.Encoder.encode(seal_sig_b64, seal_sig_slice);
 
     // Step 10: Build final ARC-Seal with signature
     const as_final = ArcSeal{
